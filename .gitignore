@@ -18,6 +18,7 @@ env/
 # IDE
 .vscode/
 .idea/
+.kiro/
 *.swp
 *.swo
 
@@ -27,8 +28,8 @@ Thumbs.db
 
 # Build artifacts
 upx.exe
-准星程序_v2.0.0_发布包/
-准星程序_v2.0.0.zip
+准星程序_v3.0.0_发布包/
+准星程序_v3.0.0.zip
 
 # Logs
 *.log

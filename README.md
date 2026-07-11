@@ -59,11 +59,11 @@ Crosshair/
 ├── config_ui_pyside6.py        # Main UI (config window)
 ├── overlay_window_pyside6.py   # Overlay (crosshair rendering + mouse hook)
 ├── border_settings_dialog.py   # Border settings dialog
-├── build_v2.0.0.py             # PyInstaller build script (with UPX)
+├── build_v3.0.0.py             # PyInstaller build script (with UPX)
 ├── requirements.txt            # Dependencies
-├── 准星程序.exe                # Prebuilt executable
-├── 准星程序.spec               # PyInstaller spec
-└── 小林の准星V2.00/            # v2.0.0 release package
+├── FAV/                        # App icon assets (favicon_1024.png, app.ico, ...)
+├── 小林の准星.exe              # Prebuilt executable (v3.0.0, built via build_v3.0.0.py)
+└── 小林の准星V2.00/            # v2.0.0 release package (legacy, exe named 准星程序.exe)
     ├── 准星程序.exe
     └── 版本说明_v2.0.0.txt
 ```
@@ -87,12 +87,22 @@ Configs are stored under `%APPDATA%/CrosshairApp/`, one JSON file per preset. Th
 ## Build
 
 ```bash
-python build_v2.0.0.py
+python build_v3.0.0.py
 ```
 
 This script packages the app into a single-file exe with PyInstaller, then compresses it with UPX (UPX is auto-downloaded if missing). The output is a release folder and a zip.
 
 ## Version History
+
+### v3.0.0
+- **Control opacity slider**: a new slider next to "Background Opacity" adjusts the background transparency of all cards / input fields / buttons at once, while the text stays fully opaque
+- Background-image crop selection no longer shrinks when dragged to the image edge — it keeps its size instead
+- Shape dropdown options are now localized (they follow the language instead of showing raw variable names)
+- Completed English localization for the Hotkey, Position, Save Current Config, and Theme labels
+- App branding unified: Chinese title/window title is **小林の准星**, English title/window title is **Roland's Crosshair**
+- App icon now uses the high-resolution icon from `FAV/favicon_1024.png`
+- Fixed: switching presets didn't re-apply that preset's hotkey until you re-set it manually
+- The app now remembers the last-used preset and language and restores them on next launch (previously always reopened on the default preset, silently dropping any hotkey saved in another preset)
 
 ### v2.0.0 (2026-01-18)
 - Global right-click toggle for the crosshair (low-level mouse hook)

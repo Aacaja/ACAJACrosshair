@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import json
 import glob
 import ctypes
@@ -14,6 +15,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QColor, QKeySequence, QAction, QIcon, QPen, QPainter, QPixmap, QImage
+from theme import detect_system_theme, get_effective_theme, generate_qss
+from background_dialog import BackgroundCropDialog
 
 # Windows API imports
 try:
@@ -30,6 +33,61 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 
+# 应用版本号（窗口标题等处统一引用）
+APP_VERSION = "3.0.0"
+
+
+def resource_path(relative_path):
+    """解析资源文件的绝对路径。
+
+    兼容两种运行方式：
+    - 源码运行：以本文件所在目录为基准。
+    - PyInstaller 打包（onefile）：以解包临时目录 sys._MEIPASS 为基准。
+    """
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+# 控件不透明度默认值（配置键缺失或无效时回退）
+DEFAULT_CONTROL_OPACITY = 1.0
+
+
+def _clamp01(value: float) -> float:
+    """将浮点值钳制到 [0.0, 1.0]：小于 0.0 映射为 0.0，大于 1.0 映射为 1.0，范围内保持不变。"""
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+def _sanitize_control_opacity(value) -> float:
+    """校验并归一化控件不透明度配置值。
+
+    对非数字（含 None、字符串、bool、NaN）或越界（<0.0 或 >1.0）的输入，
+    丢弃并回退到默认值 1.0；对范围内的有效数字则原样返回其 float。
+    """
+    # 排除 bool（bool 是 int 的子类，不应被当作有效不透明度）
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_CONTROL_OPACITY
+    numeric = float(value)
+    # 排除 NaN 与无穷
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return DEFAULT_CONTROL_OPACITY
+    # 越界值视为无效，回退默认
+    if numeric < 0.0 or numeric > 1.0:
+        return DEFAULT_CONTROL_OPACITY
+    return numeric
+
+
+def _is_valid_control_opacity(value) -> bool:
+    """判断控件不透明度存储值是否为有效的范围内数字（非 bool/非数字/NaN/无穷/越界均为无效）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    numeric = float(value)
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return False
+    return 0.0 <= numeric <= 1.0
+
 
 class ConfigUI(QMainWindow):
     def __init__(self):
@@ -41,7 +99,7 @@ class ConfigUI(QMainWindow):
         self.language = "zh"
         self.strings = {
             "zh": {
-                "title": "天才小林の准星",
+                "title": "小林の准星",
                 "author": "Bilibili：林晓CCC",
                 "config_management": "配置管理",
                 "preset_config": "预设配置:",
@@ -55,6 +113,14 @@ class ConfigUI(QMainWindow):
                 "hide_crosshair": "隐藏准星",
                 "crosshair_settings": "准星设置",
                 "shape": "形状:",
+                "shape_cross": "十字",
+                "shape_dot": "圆点",
+                "shape_square": "方块",
+                "shape_circle": "圆形",
+                "shape_hollow_cross": "空心十字",
+                "shape_hollow_square": "空心方块",
+                "shape_hollow_cross_dot": "空心十字加点",
+                "shape_custom_image": "自定义图片",
                 "size": "大小:",
                 "thickness": "粗细:",
                 "opacity": "透明度:",
@@ -73,6 +139,8 @@ class ConfigUI(QMainWindow):
                 "save_current": "保存当前配置",
                 "language": "语言:",
                 "invalid_address": "地址无效！",
+                "save_failed": "保存失败，已保留上次成功保存的值。",
+                "control_opacity_reset": "控件不透明度存储值无效，已重置为默认。",
                 "warning": "警告",
                 "success": "成功",
                 "error": "错误",
@@ -121,10 +189,20 @@ class ConfigUI(QMainWindow):
                 "tray_tooltip_show": "准星程序 - 准星显示",
                 "tray_tooltip_hide": "准星程序 - 准星隐藏",
                 "right_click_enabled_msg": "全局右键快捷键已启用\n\n即使程序最小化或失去焦点，\n在任何位置点击右键都可以切换准星。",
-                "drag_hint": "拖动模式 - 拖动准星到想要的位置",
+                                "drag_hint": "拖动模式 - 拖动准星到想要的位置",
+                "theme": "主题:",
+                "theme_auto": "自动",
+                "theme_light": "浅色",
+                "theme_dark": "深色",
+                "theme_custom": "自定义",
+                "ui_background": "界面背景",
+                "select_bg_image": "选择背景图片",
+                "clear_bg": "清除背景",
+                "bg_opacity": "背景不透明度:",
+                "control_opacity": "控件不透明度:",
             },
             "en": {
-                "title": "Crosshair Program",
+                "title": "Roland's Crosshair",
                 "author": "Bilibili: 林晓CCC",
                 "config_management": "Configuration Management",
                 "preset_config": "Preset Config:",
@@ -138,6 +216,14 @@ class ConfigUI(QMainWindow):
                 "hide_crosshair": "Hide Crosshair",
                 "crosshair_settings": "Crosshair Settings",
                 "shape": "Shape:",
+                "shape_cross": "Cross",
+                "shape_dot": "Dot",
+                "shape_square": "Square",
+                "shape_circle": "Circle",
+                "shape_hollow_cross": "Hollow Cross",
+                "shape_hollow_square": "Hollow Square",
+                "shape_hollow_cross_dot": "Hollow Cross with Dot",
+                "shape_custom_image": "Custom Image",
                 "size": "Size:",
                 "thickness": "Thickness:",
                 "opacity": "Opacity:",
@@ -150,6 +236,8 @@ class ConfigUI(QMainWindow):
                 "save_current": "Save Current Config",
                 "language": "Language:",
                 "invalid_address": "Invalid Address!",
+                "save_failed": "Save failed. The last successfully saved value has been kept.",
+                "control_opacity_reset": "Invalid stored control opacity was reset to default.",
                 "warning": "Warning",
                 "success": "Success",
                 "error": "Error",
@@ -198,15 +286,32 @@ class ConfigUI(QMainWindow):
                 "tray_tooltip_show": "Crosshair - visible",
                 "tray_tooltip_hide": "Crosshair - hidden",
                 "right_click_enabled_msg": "Global right-click hotkey enabled.\n\nYou can right-click anywhere\nto toggle the crosshair, even when the app is minimized or out of focus.",
-                "drag_hint": "Drag mode - drag the crosshair to the desired position",
+                                "drag_hint": "Drag mode - drag the crosshair to the desired position",
+                "theme": "Theme:",
+                "theme_auto": "Auto",
+                "theme_light": "Light",
+                "theme_dark": "Dark",
+                "theme_custom": "Custom",
+                "ui_background": "UI Background",
+                "select_bg_image": "Select Background Image",
+                "clear_bg": "Clear Background",
+                "bg_opacity": "Background Opacity:",
+                "control_opacity": "Control Opacity:",
             }
         }
         
         # 配置文件管理
         self.config_dir = os.path.join(os.environ['APPDATA'], 'CrosshairApp')
         os.makedirs(self.config_dir, exist_ok=True)
-        self.current_config_file = "default.json"
-        self.config_file_path = os.path.join(self.config_dir, self.current_config_file)
+        self.app_state_path = os.path.join(self.config_dir, "app_state.json")
+        app_state = self.load_app_state()
+
+        # 恢复上次关闭程序时使用的预设；若该预设文件已不存在则回退到默认预设
+        last_preset = app_state.get("last_preset", "default")
+        if not os.path.exists(self.get_config_path(last_preset)):
+            last_preset = "default"
+        self.current_config_file = last_preset + ".json"
+        self.config_file_path = self.get_config_path(last_preset)
         
         # 默认配置
         self.config = {
@@ -225,7 +330,12 @@ class ConfigUI(QMainWindow):
             "border_opacity": 1.0,
             "custom_image_path": "",
             "custom_image_scale": 1.0,
-            "auto_topmost_on_fullscreen": False
+            "auto_topmost_on_fullscreen": False,
+            "theme": "auto",
+            "ui_bg_enabled": False,
+            "ui_bg_image": "",
+            "ui_bg_opacity": 0.15,
+            "ui_control_opacity": 1.0
         }
         
         # 全局快捷键相关
@@ -237,10 +347,10 @@ class ConfigUI(QMainWindow):
         self.tray_menu = None
         
         self.load_config()
-        
-        # 从配置文件加载语言设置
-        self.language = self.config.get("language", "zh")
-        
+
+        # 恢复上次关闭程序时使用的语言（应用级状态优先，兼容旧版存于预设内的语言字段）
+        self.language = app_state.get("language", self.config.get("language", "zh"))
+
         self.setup_ui()
         
         # 程序启动后默认显示准星
@@ -249,6 +359,19 @@ class ConfigUI(QMainWindow):
     def t(self, key):
         """获取当前语言的字符串"""
         return self.strings[self.language].get(key, key)
+
+    def _window_title(self):
+        """根据当前语言返回窗口标题（含版本号）。"""
+        brand = "Roland's Crosshair" if self.language == "en" else "小林の准星"
+        return f"{brand} v{APP_VERSION}"
+
+    def _app_icon(self):
+        """加载应用图标（FAV 中的高分辨率图标），找不到时返回 None。"""
+        for name in ("favicon_1024.png", "app.ico", "favicon.ico"):
+            path = resource_path(os.path.join("FAV", name))
+            if os.path.exists(path):
+                return QIcon(path)
+        return None
     
     def format_text(self, key, **kwargs):
         """格式化字符串"""
@@ -274,12 +397,38 @@ class ConfigUI(QMainWindow):
             print(f"加载配置文件失败: {e}")
     
     def save_config(self):
-        """保存配置文件"""
+        """保存配置文件。
+
+        返回值：持久化成功返回 True，发生异常返回 False。
+        （返回布尔值向后兼容，既有调用方均忽略返回值。）
+        """
         try:
             with open(self.config_file_path, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
+            return True
         except Exception as e:
             print(f"保存配置文件失败: {e}")
+            return False
+
+    def load_app_state(self):
+        """加载应用级状态（记忆的语言与最近使用的预设名），与具体预设文件无关。"""
+        try:
+            if os.path.exists(self.app_state_path):
+                with open(self.app_state_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"加载应用状态失败: {e}")
+        return {}
+
+    def save_app_state(self):
+        """保存应用级状态：当前语言与当前预设名，供下次启动时恢复。"""
+        try:
+            preset_name = self.current_config_file[:-5] if self.current_config_file.endswith('.json') else self.current_config_file
+            state = {"language": self.language, "last_preset": preset_name}
+            with open(self.app_state_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"保存应用状态失败: {e}")
     
     def get_available_presets(self):
         """获取可用的预设配置列表"""
@@ -292,7 +441,11 @@ class ConfigUI(QMainWindow):
     
     def setup_ui(self):
         """设置用户界面"""
-        self.setWindowTitle("林晓の准星 v2.0.0")
+        self.setWindowTitle(self._window_title())
+        # 设置窗口图标（使用 FAV 中的高分辨率图标）
+        app_icon = self._app_icon()
+        if app_icon is not None:
+            self.setWindowIcon(app_icon)
         self.setGeometry(100, 100, 570, 900)
         self.setFixedSize(570, 900)
         
@@ -300,7 +453,8 @@ class ConfigUI(QMainWindow):
         self.setup_fonts()
         
         # 中央部件
-        central_widget = QWidget()
+        central_widget = ThemedBackgroundWidget(self)
+        central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(8)
@@ -309,13 +463,13 @@ class ConfigUI(QMainWindow):
         # 标题
         self.title_label = QLabel(self.t("title"))
         self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #0066cc; margin-bottom: 5px;")
+        self.title_label.setObjectName("titleLabel")
         main_layout.addWidget(self.title_label)
         
         # 作者信息
         self.author_label = QLabel(self.t("author"))
         self.author_label.setAlignment(Qt.AlignCenter)
-        self.author_label.setStyleSheet("font-size: 10px; color: #0066cc; margin-bottom: 8px;")
+        self.author_label.setObjectName("authorLabel")
         main_layout.addWidget(self.author_label)
         
         # 语言切换
@@ -356,9 +510,10 @@ class ConfigUI(QMainWindow):
         path_layout.addWidget(self.config_path_entry)
         config_layout.addLayout(path_layout)
         
-        # 错误提示
+        # 错误提示（默认不显示，不占空间）
         self.error_label = QLabel()
-        self.error_label.setStyleSheet("color: red; font-size: 9px;")
+        self.error_label.setObjectName("errorLabel")
+        self.error_label.setVisible(False)
         config_layout.addWidget(self.error_label)
         
         # 按钮
@@ -388,21 +543,28 @@ class ConfigUI(QMainWindow):
         # 控制按钮
         self.show_button = QPushButton(self.t("show_crosshair"))
         self.show_button.clicked.connect(self.toggle_crosshair)
-        self.show_button.setStyleSheet("QPushButton { font-size: 14px; padding: 8px; }")
+        self.show_button.setObjectName("primaryButton")
         main_layout.addWidget(self.show_button)
         
         # 设置区域
         self.settings_group = QGroupBox(self.t("crosshair_settings"))
         settings_layout = QGridLayout(self.settings_group)
+        # 列拉伸: label(0)固定, slider(1)优先拉伸, entry(2)固定
+        settings_layout.setColumnStretch(0, 0)
+        settings_layout.setColumnStretch(1, 1)
+        settings_layout.setColumnStretch(2, 0)
+        settings_layout.setHorizontalSpacing(8)
         
         # 形状选择
         self.shape_label = QLabel(self.t("shape"))
         settings_layout.addWidget(self.shape_label, 0, 0)
         self.shape_var = self.config["shape"]
         self.shape_combo = QComboBox()
-        self.shape_combo.addItems(["cross", "dot", "square", "circle", "hollow_cross", "hollow_square", "hollow_cross_dot", "custom_image"])
-        self.shape_combo.setCurrentText(self.shape_var)
-        self.shape_combo.currentTextChanged.connect(self.on_shape_changed)
+        # 使用 itemData 存储实际形状值，显示文本为随语言变化的翻译
+        self._populate_shape_combo()
+        self._set_shape_combo_value(self.shape_var)
+        # 以 currentIndexChanged 触发处理，避免因翻译文本变化而误触发
+        self.shape_combo.currentIndexChanged.connect(self.on_shape_changed)
         settings_layout.addWidget(self.shape_combo, 0, 1, 1, 2)
         
         # 大小设置
@@ -448,22 +610,24 @@ class ConfigUI(QMainWindow):
         self.color_label = QLabel(self.t("color"))
         settings_layout.addWidget(self.color_label, 4, 0)
         self.color_button = QPushButton(self.t("choose_color"))
-        self.color_button.setStyleSheet(f"background-color: {self.config['color']};")
+        self.color_button.setObjectName("colorButton")
+        self.color_button.setFixedSize(100, 24)
+        self._update_color_button_bg()
         self.color_button.clicked.connect(self.choose_color)
-        settings_layout.addWidget(self.color_button, 4, 1, 1, 2)
+        # 颜色按钮放在entry列，与滑块对齐
+        settings_layout.addWidget(self.color_button, 4, 2)
         
-        # 描边设置
-        self.enable_border_label = QLabel(self.t("enable_border"))
-        settings_layout.addWidget(self.enable_border_label, 5, 0)
+        # 描边设置（复选框跨2列，避免与按钮互相挤压）
         self.enable_border_checkbox = QCheckBox(self.t("enable_border"))
         self.enable_border_checkbox.setChecked(self.config.get("enable_border", False))
         self.enable_border_checkbox.stateChanged.connect(self.on_enable_border_changed)
-        settings_layout.addWidget(self.enable_border_checkbox, 5, 1)
+        settings_layout.addWidget(self.enable_border_checkbox, 5, 0, 1, 2)
         
-        # 描边设置按钮
+        # 描边设置按钮（限制宽度，防止撑宽entry列）
         self.border_settings_button = QPushButton(self.t("border_settings"))
         self.border_settings_button.clicked.connect(self.open_border_settings)
         self.border_settings_button.setVisible(self.config.get("enable_border", False))
+        self.border_settings_button.setMaximumWidth(120)
         settings_layout.addWidget(self.border_settings_button, 5, 2)
         
         # 自定义图片设置
@@ -521,6 +685,11 @@ class ConfigUI(QMainWindow):
         # 空心十字专用设置
         self.hollow_cross_group = QGroupBox(self.t("hollow_cross_settings"))
         hollow_layout = QGridLayout(self.hollow_cross_group)
+        # 列拉伸: label(0)固定, slider(1)优先拉伸, entry(2)固定
+        hollow_layout.setColumnStretch(0, 0)
+        hollow_layout.setColumnStretch(1, 1)
+        hollow_layout.setColumnStretch(2, 0)
+        hollow_layout.setHorizontalSpacing(8)
         
         # 中心距离设置
         self.hollow_gap_label = QLabel(self.t("hollow_gap"))
@@ -583,10 +752,14 @@ class ConfigUI(QMainWindow):
         self.hotkey_button = QPushButton(self.config.get("hotkey", self.t("hotkey_undefined")))
         self.hotkey_button.clicked.connect(self.set_hotkey)
         self.hotkey_button.setToolTip(self.t("hotkey_hint"))
+        self.hotkey_button.setFixedHeight(24)
+        self.hotkey_button.setMaximumWidth(100)
         hotkey_layout.addWidget(self.hotkey_button)
         
         self.clear_hotkey_button = QPushButton(self.t("clear_hotkey"))
         self.clear_hotkey_button.clicked.connect(self.clear_hotkey)
+        self.clear_hotkey_button.setFixedHeight(24)
+        self.clear_hotkey_button.setMaximumWidth(80)
         hotkey_layout.addWidget(self.clear_hotkey_button)
         
         hotkey_layout.addStretch()
@@ -602,7 +775,7 @@ class ConfigUI(QMainWindow):
         
         self.drag_button = QPushButton(self.t("drag_mode"))
         self.drag_button.clicked.connect(self.toggle_drag_mode)
-        self.drag_button.setStyleSheet("QPushButton { background-color: #ff6b6b; color: white; }")
+        self.drag_button.setObjectName("dragButton")
         position_layout.addWidget(self.drag_button)
         
         position_layout.addStretch()
@@ -610,33 +783,32 @@ class ConfigUI(QMainWindow):
         
         main_layout.addWidget(self.settings_group)
         
-        # 右键快捷键选项
-        right_click_layout = QHBoxLayout()
+        # 右键快捷键 / 关闭到托盘 / 全屏置顶 三个选项同一行
+        options_layout = QHBoxLayout()
         self.right_click_checkbox = QCheckBox(self.t("right_click_toggle"))
         self.right_click_checkbox.setChecked(self.config.get("right_click_shortcut", False))
         self.right_click_checkbox.stateChanged.connect(self.on_right_click_changed)
-        right_click_layout.addWidget(self.right_click_checkbox)
+        self.right_click_checkbox.setToolTip(self.t("right_click_warning"))
+        options_layout.addWidget(self.right_click_checkbox)
         
-        # 添加警告标签
-        self.warning_label = QLabel(self.t("right_click_warning"))
-        self.warning_label.setStyleSheet("color: #ff9800; font-size: 9px;")
-        right_click_layout.addWidget(self.warning_label)
-        right_click_layout.addStretch()
-        
-        main_layout.addLayout(right_click_layout)
-        
-        # 关闭到托盘选项
         self.minimize_to_tray_checkbox = QCheckBox(self.t("minimize_to_tray"))
         self.minimize_to_tray_checkbox.setChecked(self.config.get("minimize_to_tray", False))
         self.minimize_to_tray_checkbox.stateChanged.connect(self.on_minimize_to_tray_changed)
-        main_layout.addWidget(self.minimize_to_tray_checkbox)
+        options_layout.addWidget(self.minimize_to_tray_checkbox)
         
-        # 全屏自动置顶选项
         self.auto_topmost_checkbox = QCheckBox(self.t("auto_topmost_on_fullscreen"))
         self.auto_topmost_checkbox.setChecked(self.config.get("auto_topmost_on_fullscreen", False))
         self.auto_topmost_checkbox.setToolTip(self.t("auto_topmost_hint"))
         self.auto_topmost_checkbox.stateChanged.connect(self.on_auto_topmost_changed)
-        main_layout.addWidget(self.auto_topmost_checkbox)
+        options_layout.addWidget(self.auto_topmost_checkbox)
+        
+        options_layout.addStretch()
+        main_layout.addLayout(options_layout)
+        
+        # 保留 warning_label 对象（语言切换需要），但不在主界面显示
+        self.warning_label = QLabel(self.t("right_click_warning"))
+        self.warning_label.setObjectName("warningLabel")
+        self.warning_label.setVisible(False)
         
         # 初始状态设置控件可见性
         self.update_control_visibility()
@@ -646,14 +818,59 @@ class ConfigUI(QMainWindow):
         self.save_button.clicked.connect(self.save_settings)
         main_layout.addWidget(self.save_button)
         
-        # 说明文字
-        self.info_label = QLabel(self.t("info_text"))
-        self.info_label.setStyleSheet("color: gray; font-size: 9px;")
-        self.info_label.setWordWrap(True)
-        main_layout.addWidget(self.info_label)
-        
         main_layout.addStretch()
         
+        # 主题选择
+        theme_layout = QHBoxLayout()
+        self.theme_label = QLabel(self.t("theme"))
+        theme_layout.addWidget(self.theme_label)
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([self.t("theme_auto"), self.t("theme_light"), self.t("theme_dark"), self.t("theme_custom")])
+        cur_theme = self.config.get("theme", "auto")
+        theme_map = {"auto": 0, "light": 1, "dark": 2, "custom": 3}
+        self.theme_combo.setCurrentIndex(theme_map.get(cur_theme, 0))
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
+        theme_layout.addWidget(self.theme_combo)
+        theme_layout.addStretch()
+        main_layout.addLayout(theme_layout)
+
+        # 界面背景（可展开/折叠）
+        self.bg_toggle_button = QPushButton(self.t("ui_background") + " ▶")
+        self.bg_toggle_button.setCheckable(True)
+        self.bg_toggle_button.setObjectName("bgToggleButton")
+        self.bg_toggle_button.toggled.connect(self.on_bg_toggle)
+        main_layout.addWidget(self.bg_toggle_button)
+        
+        self.bg_group = QGroupBox(self.t("ui_background"))
+        bg_layout = QGridLayout(self.bg_group)
+        bg_layout.addWidget(QLabel(self.t("bg_opacity")), 0, 0)
+        self.bg_opacity_slider = QSlider(Qt.Horizontal)
+        self.bg_opacity_slider.setRange(0, 100)
+        self.bg_opacity_slider.setValue(int(self.config.get("ui_bg_opacity", 0.15) * 100))
+        self.bg_opacity_slider.valueChanged.connect(self.on_bg_opacity_changed)
+        bg_layout.addWidget(self.bg_opacity_slider, 0, 1)
+        # 控件不透明度滑块（紧跟背景不透明度滑块之后）
+        self.control_opacity_label = QLabel(self.t("control_opacity"))
+        bg_layout.addWidget(self.control_opacity_label, 1, 0)
+        self.control_opacity_slider = QSlider(Qt.Horizontal)
+        self.control_opacity_slider.setRange(0, 100)
+        self.control_opacity_slider.setSingleStep(1)
+        self.control_opacity_slider.setValue(int(self.config.get("ui_control_opacity", 1.0) * 100))
+        self.control_opacity_slider.valueChanged.connect(self.on_control_opacity_changed)
+        bg_layout.addWidget(self.control_opacity_slider, 1, 1)
+        # 选择/清除按钮行相应下移到第 2 行
+        self.select_bg_button = QPushButton(self.t("select_bg_image"))
+        self.select_bg_button.clicked.connect(self.select_bg_image)
+        bg_layout.addWidget(self.select_bg_button, 2, 0)
+        self.clear_bg_button = QPushButton(self.t("clear_bg"))
+        self.clear_bg_button.clicked.connect(self.clear_bg_image)
+        bg_layout.addWidget(self.clear_bg_button, 2, 1)
+        main_layout.addWidget(self.bg_group)
+        self.bg_group.setVisible(False)  # 默认折叠
+
+        # 应用主题
+        self.apply_theme()
+
         # 初始化快捷键
         self.setup_hotkey_shortcut()
         
@@ -677,15 +894,16 @@ class ConfigUI(QMainWindow):
         # 更新字体
         self.setup_fonts()
         
-        # 保存语言配置
+        # 保存语言配置（同时写入应用级状态，确保跨预设也能记住语言）
         self.config["language"] = lang
         self.save_config()
-        
+        self.save_app_state()
+
         # 刷新所有界面文本
         self.update_ui_from_config()
         
         # 刷新窗口标题
-        self.setWindowTitle("林晓の准星 v2.0.0")
+        self.setWindowTitle(self._window_title())
         
         # 如果系统托盘已存在,重建菜单以刷新文本
         if self.tray_icon is not None:
@@ -748,10 +966,13 @@ class ConfigUI(QMainWindow):
             
             self.save_config()
             self.update_ui_from_config()
+            # 新预设默认无快捷键，重新注册以清除旧预设遗留的快捷键
+            self.setup_hotkey_shortcut()
+            self.save_app_state()
             self.update_preset_list()
             self.preset_combo.setCurrentText(preset_name)
             self.config_path_entry.setText(self.config_file_path)
-            
+
             QMessageBox.information(self, self.t("success"), self.format_text("preset_created", name=preset_name))
     
     def load_preset(self):
@@ -797,16 +1018,22 @@ class ConfigUI(QMainWindow):
         # 更新UI
         self.update_ui_from_config()
         self.config_path_entry.setText(self.config_file_path)
-        
+
+        # 重新注册全局快捷键，确保切换预设后快捷键立即生效（而不必手动重新设置）
+        self.setup_hotkey_shortcut()
+
+        # 记录本次使用的预设，供下次启动时恢复
+        self.save_app_state()
+
         # 更新准星显示
         if self.overlay_window:
             self.overlay_window.updateConfig(self.config)
-        
+
         # 如果准星已显示，重新显示以应用新配置
         if self.is_shown:
             self.hide_crosshair()
             self.show_crosshair()
-    
+
     def save_preset(self):
         """保存预设配置"""
         self.update_config_from_ui()
@@ -843,8 +1070,9 @@ class ConfigUI(QMainWindow):
                     os.remove(preset_file)
                     QMessageBox.information(self, self.t("success"), self.t("preset_deleted"))
                     self.update_preset_list()
+                    # setCurrentText 会触发 currentTextChanged -> on_preset_selected('default')，
+                    # 从而自动加载 default 预设，无需在此重复调用
                     self.preset_combo.setCurrentText('default')
-                    self.on_preset_selected()
             except Exception as e:
                 QMessageBox.critical(self, self.t("error"), self.format_text("delete_failed", error=str(e)))
     
@@ -952,10 +1180,10 @@ class ConfigUI(QMainWindow):
             is_drag_mode = self.overlay_window.toggleDragMode()
             if is_drag_mode:
                 self.drag_button.setText(self.t("normal_mode"))
-                self.drag_button.setStyleSheet("QPushButton { background-color: #51cf66; color: white; }")
+                self.drag_button.setObjectName("dragButton")
             else:
                 self.drag_button.setText(self.t("drag_mode"))
-                self.drag_button.setStyleSheet("QPushButton { background-color: #ff6b6b; color: white; }")
+                self.drag_button.setObjectName("dragButton")
                 # 退出拖动模式时保存位置
                 if hasattr(self.overlay_window, 'get_crosshair_position'):
                     pos = self.overlay_window.get_crosshair_position()
@@ -968,6 +1196,33 @@ class ConfigUI(QMainWindow):
         self.save_config()
         QMessageBox.information(self, self.t("success"), self.format_text("config_saved", path=self.config_file_path))
     
+    # 形状值列表（顺序即下拉框显示顺序）；显示文本由语言字符串 shape_<value> 提供
+    SHAPE_VALUES = ["cross", "dot", "square", "circle",
+                    "hollow_cross", "hollow_square", "hollow_cross_dot", "custom_image"]
+
+    def _populate_shape_combo(self):
+        """按当前语言填充形状下拉框：显示翻译文本，itemData 存储实际形状值。"""
+        for value in self.SHAPE_VALUES:
+            self.shape_combo.addItem(self.t(f"shape_{value}"), value)
+
+    def _refresh_shape_combo_texts(self):
+        """语言切换时刷新形状下拉框各项的显示文本，保持选中值不变。"""
+        for i in range(self.shape_combo.count()):
+            value = self.shape_combo.itemData(i)
+            self.shape_combo.setItemText(i, self.t(f"shape_{value}"))
+
+    def _set_shape_combo_value(self, value):
+        """根据实际形状值选中对应下拉项。"""
+        index = self.shape_combo.findData(value)
+        if index < 0:
+            index = 0
+        self.shape_combo.setCurrentIndex(index)
+
+    def _get_shape_value(self):
+        """获取当前选中的实际形状值（而非显示文本）。"""
+        value = self.shape_combo.currentData()
+        return value if value is not None else "cross"
+
     def on_shape_changed(self, shape):
         """形状改变事件"""
         self.update_control_visibility()
@@ -976,11 +1231,11 @@ class ConfigUI(QMainWindow):
     def update_control_visibility(self):
         """更新控件可见性"""
         # 空心十字控件
-        is_hollow_cross = self.shape_combo.currentText() in ["hollow_cross", "hollow_cross_dot"]
+        is_hollow_cross = self._get_shape_value() in ["hollow_cross", "hollow_cross_dot"]
         self.hollow_cross_group.setVisible(is_hollow_cross)
         
         # 中心点大小控件只在空心十字加点时显示
-        is_hollow_cross_dot = self.shape_combo.currentText() == "hollow_cross_dot"
+        is_hollow_cross_dot = self._get_shape_value() == "hollow_cross_dot"
         
         # 控制中心点大小相关控件的可见性（在hollow_layout的第3行）
         # 第3行包含：label(0), slider(1), entry(2)
@@ -992,7 +1247,7 @@ class ConfigUI(QMainWindow):
                     widget.setVisible(is_hollow_cross_dot)
         
         # 自定义图片控件
-        is_custom_image = self.shape_combo.currentText() == "custom_image"
+        is_custom_image = self._get_shape_value() == "custom_image"
         self.custom_image_group.setVisible(is_custom_image)
     
     def update_center_dot_size_label(self, value):
@@ -1231,21 +1486,20 @@ class ConfigUI(QMainWindow):
         try:
             # 创建托盘图标
             self.tray_icon = QSystemTrayIcon(self)
-            
-            # 创建一个自定义图标
-            icon_pixmap = QPixmap(32, 32)
-            icon_pixmap.fill(Qt.transparent)
-            painter = QPainter(icon_pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            
-            # 绘制一个十字作为图标
-            painter.setPen(QPen(QColor("#FF0000"), 4))
-            painter.drawLine(8, 16, 24, 16)  # 水平线
-            painter.drawLine(16, 8, 16, 24)  # 垂直线
-            painter.end()
-            
-            # 创建图标
-            tray_icon = QIcon(icon_pixmap)
+
+            # 优先使用 FAV 中的应用图标；找不到时回退为绘制的红色十字
+            tray_icon = self._app_icon()
+            if tray_icon is None:
+                icon_pixmap = QPixmap(32, 32)
+                icon_pixmap.fill(Qt.transparent)
+                painter = QPainter(icon_pixmap)
+                painter.setRenderHint(QPainter.Antialiasing)
+                # 绘制一个十字作为图标
+                painter.setPen(QPen(QColor("#FF0000"), 4))
+                painter.drawLine(8, 16, 24, 16)  # 水平线
+                painter.drawLine(16, 8, 16, 24)  # 垂直线
+                painter.end()
+                tray_icon = QIcon(icon_pixmap)
             self.tray_icon.setIcon(tray_icon)
             
             # 创建托盘菜单
@@ -1358,6 +1612,7 @@ class ConfigUI(QMainWindow):
     
     def quit_application(self):
         """退出应用程序"""
+        self.save_app_state()
         self.unregister_global_hotkey()
         if self.overlay_window:
             self.overlay_window.unregister_global_mouse_hook()
@@ -1374,6 +1629,7 @@ class ConfigUI(QMainWindow):
             self.hide()
         else:
             # 正常关闭
+            self.save_app_state()
             self.unregister_global_hotkey()
             if self.overlay_window:
                 self.overlay_window.close()
@@ -1383,24 +1639,24 @@ class ConfigUI(QMainWindow):
     
     def update_config_from_ui(self):
         """从UI更新配置"""
-        self.config["shape"] = self.shape_combo.currentText()
+        self.config["shape"] = self._get_shape_value()
         self.config["size"] = self.size_slider.value()
         self.config["thickness"] = self.thickness_slider.value()
         self.config["opacity"] = self.opacity_slider.value() / 100.0
         
         # 保存自定义图片相关参数
-        if self.shape_combo.currentText() == "custom_image":
+        if self._get_shape_value() == "custom_image":
             self.config["custom_image_path"] = self.image_path_entry.text()
             self.config["custom_image_scale"] = self.image_scale_slider.value() / 100.0
         
         # 保存空心十字专用参数
-        if self.shape_combo.currentText() in ["hollow_cross", "hollow_cross_dot"]:
+        if self._get_shape_value() in ["hollow_cross", "hollow_cross_dot"]:
             self.config["hollow_gap"] = self.hollow_gap_slider.value()
             self.config["hollow_length"] = self.hollow_length_slider.value()
             self.config["hollow_thickness"] = self.hollow_thickness_slider.value()
         
         # 保存中心点大小参数
-        if self.shape_combo.currentText() == "hollow_cross_dot":
+        if self._get_shape_value() == "hollow_cross_dot":
             self.config["center_dot_size"] = self.center_dot_size_slider.value()
         
         # 保存描边参数
@@ -1427,6 +1683,7 @@ class ConfigUI(QMainWindow):
         self.center_dot_size_slider.blockSignals(True)
         self.enable_border_checkbox.blockSignals(True)
         self.language_combo.blockSignals(True)
+        self.control_opacity_slider.blockSignals(True)
         
         try:
             # 更新静态标签和标题
@@ -1457,7 +1714,7 @@ class ConfigUI(QMainWindow):
             self.thickness_label.setText(self.t("thickness"))
             self.opacity_label.setText(self.t("opacity"))
             self.color_label.setText(self.t("color"))
-            self.enable_border_label.setText(self.t("enable_border"))
+            self.enable_border_checkbox.setText(self.t("enable_border"))
             
             # 更新自定义图片区域标签
             self.image_path_label.setText(self.t("image_path"))
@@ -1481,7 +1738,10 @@ class ConfigUI(QMainWindow):
             self.auto_topmost_checkbox.setChecked(self.config.get("auto_topmost_on_fullscreen", False))
             self.border_settings_button.setText(self.t("border_settings"))
             self.warning_label.setText(self.t("right_click_warning"))
-            self.info_label.setText(self.t("info_text"))
+            # 更新界面背景展开框文本
+            arrow = "▼" if self.bg_toggle_button.isChecked() else "▶"
+            self.bg_toggle_button.setText(f"{self.t('ui_background')} {arrow}")
+            self.bg_group.setTitle(self.t("ui_background"))
             
             # 更新显示/隐藏按钮文本
             if self.is_shown:
@@ -1496,9 +1756,10 @@ class ConfigUI(QMainWindow):
             else:
                 self.drag_button.setText(self.t("drag_mode"))
             
-            # 更新形状
+            # 更新形状：刷新各项翻译文本并按实际值选中
+            self._refresh_shape_combo_texts()
             shape = self.config.get("shape", "cross")
-            self.shape_combo.setCurrentText(shape)
+            self._set_shape_combo_value(shape)
             
             # 更新大小
             size = int(self.config.get("size", 20))
@@ -1546,8 +1807,19 @@ class ConfigUI(QMainWindow):
             
             # 更新快捷键设置
             hotkey = self.config.get("hotkey", "")
+            self.hotkey_label.setText(self.t("hotkey"))
             self.hotkey_button.setText(hotkey if hotkey else self.t("hotkey_undefined"))
-            
+
+            # 更新位置、保存按钮与主题相关文本
+            self.position_label.setText(self.t("position"))
+            self.save_button.setText(self.t("save_current"))
+            self.theme_label.setText(self.t("theme"))
+            # 主题下拉框各项文本随语言刷新（保持当前选中项不变）
+            theme_item_keys = ["theme_auto", "theme_light", "theme_dark", "theme_custom"]
+            for i, key in enumerate(theme_item_keys):
+                if i < self.theme_combo.count():
+                    self.theme_combo.setItemText(i, self.t(key))
+
             # 更新语言下拉框
             self.language_combo.setCurrentText(self.language)
             
@@ -1560,6 +1832,21 @@ class ConfigUI(QMainWindow):
             self.image_scale_slider.setValue(int(image_scale * 100))
             self.image_scale_entry.setText(str(image_scale))
             self.update_image_preview()
+
+            # 更新控件不透明度滑块与标签
+            self.control_opacity_label.setText(self.t("control_opacity"))
+            if "ui_control_opacity" in self.config:
+                raw_control_opacity = self.config["ui_control_opacity"]
+                control_opacity = _sanitize_control_opacity(raw_control_opacity)
+                # 存储值无效（非数字/NaN/越界）时回退默认并提示"无效值已重置"
+                if not _is_valid_control_opacity(raw_control_opacity):
+                    self.config["ui_control_opacity"] = control_opacity
+                    self.error_label.setText(self.t("control_opacity_reset"))
+                    self.error_label.setVisible(True)
+            else:
+                # 配置缺失时使用默认值（不视为无效，无需提示）
+                control_opacity = DEFAULT_CONTROL_OPACITY
+            self.control_opacity_slider.setValue(int(control_opacity * 100))
             
         finally:
             # 重新连接信号
@@ -1573,3 +1860,155 @@ class ConfigUI(QMainWindow):
             self.center_dot_size_slider.blockSignals(False)
             self.enable_border_checkbox.blockSignals(False)
             self.language_combo.blockSignals(False)
+            self.control_opacity_slider.blockSignals(False)
+
+    def apply_theme(self):
+        """应用当前主题到整个界面。"""
+        effective = get_effective_theme(self.config)
+        # 从 config 读取控件不透明度并钳制后传入 QSS 生成器
+        control_opacity = _sanitize_control_opacity(
+            self.config.get("ui_control_opacity", DEFAULT_CONTROL_OPACITY)
+        )
+        qss = generate_qss(effective, control_opacity=control_opacity)
+        # 应用到中央部件及其子部件
+        central = self.centralWidget()
+        if central is not None:
+            central.setStyleSheet(qss)
+        # 同步背景图给 central widget
+        if hasattr(central, 'set_background'):
+            central.set_background(
+                self.config.get("ui_bg_enabled", False),
+                self.config.get("ui_bg_image", ""),
+                self.config.get("ui_bg_opacity", 0.15)
+            )
+
+    def on_theme_changed(self, index):
+        """主题下拉框改变。"""
+        themes = ["auto", "light", "dark", "custom"]
+        self.config["theme"] = themes[index] if 0 <= index < len(themes) else "auto"
+        self.save_config()
+        # 选择"自定义"时：展开界面背景区并启用背景图
+        if self.config["theme"] == "custom":
+            self.bg_toggle_button.setChecked(True)
+            self.config["ui_bg_enabled"] = True
+            self.save_config()
+            # 如果还没有背景图，提示用户选择
+            if not self.config.get("ui_bg_image") or not os.path.exists(self.config["ui_bg_image"]):
+                QMessageBox.information(self, self.t("ui_background"), self.t("select_bg_image"))
+        self.apply_theme()
+
+    def on_bg_toggle(self, checked):
+        """界面背景展开/折叠。"""
+        self.bg_group.setVisible(checked)
+        arrow = "▼" if checked else "▶"
+        self.bg_toggle_button.setText(f"{self.t('ui_background')} {arrow}")
+
+    def on_bg_opacity_changed(self, value):
+        """背景不透明度改变。"""
+        self.config["ui_bg_opacity"] = value / 100.0
+        self.save_config()
+        self.apply_theme()
+
+    def on_control_opacity_changed(self, value):
+        """控件不透明度改变：value/100 → 钳制 [0,1] → 写入 config → 持久化 → 重新应用主题。
+
+        持久化失败时（Req 2.5）：保留上次成功持久化的值，通过 error_label 显示保存失败提示，
+        不弹模态框、不使 UI 崩溃。
+        """
+        # 记录上次成功持久化的值，便于持久化失败时回滚
+        previous_value = self.config.get("ui_control_opacity", DEFAULT_CONTROL_OPACITY)
+        new_value = _clamp01(value / 100.0)
+        self.config["ui_control_opacity"] = new_value
+
+        if self.save_config():
+            # 持久化成功：清除历史错误提示并应用主题
+            self.error_label.setText("")
+            self.error_label.setVisible(False)
+            self.apply_theme()
+        else:
+            # 持久化失败：回滚为上次成功持久化的值，并显示非阻塞错误提示
+            self.config["ui_control_opacity"] = previous_value
+            self.error_label.setText(self.t("save_failed"))
+            self.error_label.setVisible(True)
+
+    def select_bg_image(self):
+        """选择背景图片,弹出裁剪对话框。"""
+        from PySide6.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, self.t("select_bg_image"), "",
+            "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)"
+        )
+        if not file_path:
+            return
+        pixmap = QPixmap(file_path)
+        if pixmap.isNull():
+            return
+        dlg = BackgroundCropDialog(pixmap, self, self.language)
+        if dlg.exec() == QDialog.Accepted:
+            cropped = dlg.get_cropped_pixmap()
+            if cropped is not None and not cropped.isNull():
+                # 保存到 APPDATA
+                bg_path = os.path.join(self.config_dir, "bg.png")
+                cropped.save(bg_path, "PNG")
+                self.config["ui_bg_image"] = bg_path
+                self.config["ui_bg_enabled"] = True
+                self.save_config()
+                self.apply_theme()
+
+    def clear_bg_image(self):
+        """清除背景图片。"""
+        self.config["ui_bg_enabled"] = False
+        self.save_config()
+        self.apply_theme()
+
+    def _update_color_button_bg(self):
+        """更新颜色按钮的背景色(保留主题边框)。"""
+        c = self.config.get('color', '#FF0000')
+        self.color_button.setText(c)
+        # 仅设置背景色,QSS 提供 border
+        self.color_button.setStyleSheet(
+            f"QPushButton#colorButton {{ background-color: {c}; }}"
+        )
+
+
+
+class ThemedBackgroundWidget(QWidget):
+    """带背景图片绘制能力的中央部件。"""
+
+    def __init__(self, main_window=None):
+        super().__init__()
+        self.main_window = main_window
+        self._bg_enabled = False
+        self._bg_image_path = ""
+        self._bg_opacity = 0.15
+        self._bg_pixmap = None
+        # 让 QWidget 绘制 QSS 样式表中的背景色（否则只有子控件变色）
+        self.setAttribute(Qt.WA_StyledBackground, True)
+
+    def set_background(self, enabled, image_path, opacity):
+        """设置背景图。"""
+        self._bg_enabled = enabled
+        self._bg_image_path = image_path
+        self._bg_opacity = opacity
+        self._bg_pixmap = None
+        if enabled and image_path and os.path.exists(image_path):
+            self._bg_pixmap = QPixmap(image_path)
+        self.update()
+
+    def paintEvent(self, event):
+        """先画背景图(带透明度),再交给父类画控件。"""
+        from PySide6.QtGui import QPainter
+        if self._bg_enabled and self._bg_pixmap is not None and not self._bg_pixmap.isNull():
+            painter = QPainter(self)
+            painter.setOpacity(self._bg_opacity)
+            # 拉伸铺满
+            scaled = self._bg_pixmap.scaled(
+                self.width(), self.height(),
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation
+            )
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+            painter.end()
+        super().paintEvent(event)

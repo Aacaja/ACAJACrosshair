@@ -5,7 +5,8 @@ import sys
 import os
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
-from config_ui_pyside6 import ConfigUI
+from PySide6.QtGui import QIcon
+from config_ui_pyside6 import ConfigUI, resource_path
 
 
 def main():
@@ -18,9 +19,14 @@ def main():
         app.setStyle("Fusion")
         
         # 设置应用程序信息
-        app.setApplicationName("准星程序")
-        app.setApplicationVersion("2.0.0")
+        app.setApplicationName("小林の准星")
+        app.setApplicationVersion("3.0.0")
         app.setOrganizationName("林晓CCC")
+
+        # 设置应用程序图标（使用 FAV 中的高分辨率图标）
+        icon_file = resource_path(os.path.join("FAV", "favicon_1024.png"))
+        if os.path.exists(icon_file):
+            app.setWindowIcon(QIcon(icon_file))
         
         # 启用高DPI支持（新版PySide6不需要这些设置）
         # app.setAttribute(Qt.AA_EnableHighDpiScaling)  # 已弃用
