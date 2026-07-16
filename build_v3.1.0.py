@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-准星程序 v3.0.0 打包脚本
+准星程序 v3.1.0 打包脚本
 使用 PyInstaller 打包成独立的可执行文件
 """
 
@@ -109,7 +109,7 @@ def compress_with_upx(exe_path, upx_path):
 def build_executable():
     """打包可执行文件"""
     print("=" * 50)
-    print("准星程序 v3.0.0 打包工具（含UPX压缩）")
+    print("准星程序 v3.1.0 打包工具（含UPX压缩）")
     print("=" * 50)
     
     # 检查并安装UPX
@@ -192,7 +192,7 @@ def build_executable():
         print("[OK] 清理临时文件")
     
     # 创建发布包
-    release_dir = f"准星程序_v3.0.0_发布包"
+    release_dir = f"准星程序_v3.1.0_发布包"
     if os.path.exists(release_dir):
         shutil.rmtree(release_dir)
     
@@ -215,18 +215,27 @@ def build_executable():
             print(f"[WARNING] 文件不存在: {file}")
     
     # 创建版本信息文件
-    version_info = f"""准星程序 v3.0.0 版本信息
+    version_info = f"""准星程序 v3.1.0 版本信息
 
 发布时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 新功能:
-- 新增"控件不透明度"滑块，可统一调节卡片/输入框/按钮的背景透明度，文字保持清晰
-- 英文应用标题更新为 Roland's Crosshair
+- 新增"按住右键切换准星"模式（按住显示 / 按住隐藏），与原有的"点击切换"并列可选
+- 粗细滑块支持小数点（精度到 0.1）
+- 滑块旁边的数值输入框现在可以直接手动输入生效（此前只是纯显示，输入不生效）
 
 改进:
-- 背景图裁剪选区拖到图片边缘时保持尺寸不再被压缩
-- 形状下拉框选项名称随语言切换显示（不再显示变量名）
-- 补全快捷键、位置、保存当前配置、主题等标签的英文本地化
+- 程序会记住上次使用的预设和语言，重启后自动恢复（此前每次都固定加载默认预设）
+- 切换预设后快捷键立即生效，不用再手动重新设置一次
+- 空心十字设置简化：去掉了单独的"直线长度/直线粗细"，统一使用上方的"大小/粗细"
+- 空心十字设置的滑块间距加大，不再挤在一起
+- 补全"空心十字设置""中心点大小""中心距离"等标签的英文本地化，并修复语言切换时部分标签不刷新的问题
+- 启用"右键切换准星"时不再弹出提示框
+
+修复:
+- 修复"按住显示"模式下按住右键可能导致程序崩溃的问题
+- 修复删除预设后偶发误报"删除失败"（实际已删除成功）
+- 修复打包脚本 UPX 压缩步骤因路径解析问题静默失败
 
 文件说明:
 - 准星程序.exe: 主程序文件
@@ -236,14 +245,14 @@ def build_executable():
 
 作者: B站：林晓CCC
 """
-    
-    with open(os.path.join(release_dir, "版本说明_v3.0.0.txt"), "w", encoding="utf-8") as f:
+
+    with open(os.path.join(release_dir, "版本说明_v3.1.0.txt"), "w", encoding="utf-8") as f:
         f.write(version_info)
     
     print("[OK] 创建版本说明文件")
     
     # 压缩发布包
-    zip_name = "准星程序_v3.0.0.zip"
+    zip_name = "准星程序_v3.1.0.zip"
     if os.path.exists(zip_name):
         os.remove(zip_name)
     
@@ -254,7 +263,7 @@ def build_executable():
         zip_size = os.path.getsize(zip_name) / (1024 * 1024)  # MB
         print(f"[OK] 压缩完成: {zip_name} ({zip_size:.1f} MB)")
     
-    print(f"\n[SUCCESS] 准星程序 v3.0.0 打包完成！")
+    print(f"\n[SUCCESS] 准星程序 v3.1.0 打包完成！")
     print(f"[INFO] 发布包位置: {os.path.abspath(release_dir)}")
     print(f"[INFO] 压缩包位置: {os.path.abspath(zip_name)}")
     

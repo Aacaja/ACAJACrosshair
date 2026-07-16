@@ -34,7 +34,7 @@ MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 
 # 应用版本号（窗口标题等处统一引用）
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 
 
 def resource_path(relative_path):
@@ -132,10 +132,7 @@ class ConfigUI(QMainWindow):
                 "normal_mode": "正常模式",
                 "hollow_cross_settings": "空心十字设置:",
                 "center_dot_size": "中心点大小:",
-                "hollow_cross_dot_settings": "空心十字加点设置:",
                 "hollow_gap": "中心距离:",
-                "hollow_length": "直线长度:",
-                "hollow_thickness": "直线粗细:",
                 "save_current": "保存当前配置",
                 "language": "语言:",
                 "invalid_address": "地址无效！",
@@ -173,6 +170,9 @@ class ConfigUI(QMainWindow):
                 "no_image": "未选择图片",
                 "right_click_toggle": "右键切换准星",
                 "right_click_warning": "启用后将拦截全局右键",
+                "right_click_mode_click": "点击切换",
+                "right_click_mode_hold_show": "按住显示",
+                "right_click_mode_hold_hide": "按住隐藏",
                 "minimize_to_tray": "关闭到系统托盘",
                 "info_text": "1. 选择预设并自定义参数\n2. 点击显示准星\n3. 记得保存！\n4. 目前暂不支持全屏游戏使用，建议使用无边框",
                 "auto_topmost_on_fullscreen": "全屏时自动置顶",
@@ -188,7 +188,6 @@ class ConfigUI(QMainWindow):
                 "tray_quit": "退出",
                 "tray_tooltip_show": "准星程序 - 准星显示",
                 "tray_tooltip_hide": "准星程序 - 准星隐藏",
-                "right_click_enabled_msg": "全局右键快捷键已启用\n\n即使程序最小化或失去焦点，\n在任何位置点击右键都可以切换准星。",
                                 "drag_hint": "拖动模式 - 拖动准星到想要的位置",
                 "theme": "主题:",
                 "theme_auto": "自动",
@@ -233,6 +232,9 @@ class ConfigUI(QMainWindow):
                 "center": "Center",
                 "drag_mode": "Drag Mode",
                 "normal_mode": "Normal Mode",
+                "hollow_cross_settings": "Hollow Cross Settings:",
+                "center_dot_size": "Center Dot Size:",
+                "hollow_gap": "Center Gap:",
                 "save_current": "Save Current Config",
                 "language": "Language:",
                 "invalid_address": "Invalid Address!",
@@ -270,6 +272,9 @@ class ConfigUI(QMainWindow):
                 "no_image": "No Image Selected",
                 "right_click_toggle": "Right click toggle crosshair",
                 "right_click_warning": "Will intercept global right click after enabling",
+                "right_click_mode_click": "Click to toggle",
+                "right_click_mode_hold_show": "Hold to show",
+                "right_click_mode_hold_hide": "Hold to hide",
                 "minimize_to_tray": "Minimize to system tray",
                 "info_text": "1. Select preset and customize parameters\n2. Click Show Crosshair\n3. Remember to save!\n4. Not support fullscreen games currently, suggest using borderless window",
                 "auto_topmost_on_fullscreen": "Auto topmost on fullscreen",
@@ -285,7 +290,6 @@ class ConfigUI(QMainWindow):
                 "tray_quit": "Quit",
                 "tray_tooltip_show": "Crosshair - visible",
                 "tray_tooltip_hide": "Crosshair - hidden",
-                "right_click_enabled_msg": "Global right-click hotkey enabled.\n\nYou can right-click anywhere\nto toggle the crosshair, even when the app is minimized or out of focus.",
                                 "drag_hint": "Drag mode - drag the crosshair to the desired position",
                 "theme": "Theme:",
                 "theme_auto": "Auto",
@@ -324,6 +328,7 @@ class ConfigUI(QMainWindow):
             "hotkey": "",
             "minimize_to_tray": False,
             "right_click_shortcut": False,
+            "right_click_mode": "click",
             "enable_border": False,
             "border_thickness": 1,
             "border_color": "#000000",
@@ -577,6 +582,7 @@ class ConfigUI(QMainWindow):
         self.size_slider.valueChanged.connect(self.update_size_label)
         self.size_entry = QLineEdit(str(self.size_var))
         self.size_entry.setFixedWidth(60)
+        self.size_entry.editingFinished.connect(lambda: self._commit_slider_entry(self.size_entry, self.size_slider))
         settings_layout.addWidget(self.size_slider, 1, 1)
         settings_layout.addWidget(self.size_entry, 1, 2)
         
@@ -585,11 +591,13 @@ class ConfigUI(QMainWindow):
         settings_layout.addWidget(self.thickness_label, 2, 0)
         self.thickness_var = float(self.config["thickness"])
         self.thickness_slider = QSlider(Qt.Horizontal)
-        self.thickness_slider.setRange(1, 20)
-        self.thickness_slider.setValue(int(self.thickness_var))
+        # 滑块内部按 0.1 的粒度存储（真实粗细 = 滑块值 / 10），以支持小数点粗细
+        self.thickness_slider.setRange(10, 200)
+        self.thickness_slider.setValue(round(self.thickness_var * 10))
         self.thickness_slider.valueChanged.connect(self.update_thickness_label)
         self.thickness_entry = QLineEdit(str(self.thickness_var))
         self.thickness_entry.setFixedWidth(60)
+        self.thickness_entry.editingFinished.connect(lambda: self._commit_slider_entry(self.thickness_entry, self.thickness_slider, divisor=10))
         settings_layout.addWidget(self.thickness_slider, 2, 1)
         settings_layout.addWidget(self.thickness_entry, 2, 2)
         
@@ -603,6 +611,7 @@ class ConfigUI(QMainWindow):
         self.opacity_slider.valueChanged.connect(self.update_opacity_label)
         self.opacity_entry = QLineEdit(str(self.opacity_var))
         self.opacity_entry.setFixedWidth(60)
+        self.opacity_entry.editingFinished.connect(lambda: self._commit_slider_entry(self.opacity_entry, self.opacity_slider, divisor=100))
         settings_layout.addWidget(self.opacity_slider, 3, 1)
         settings_layout.addWidget(self.opacity_entry, 3, 2)
         
@@ -659,6 +668,7 @@ class ConfigUI(QMainWindow):
         self.image_scale_slider.valueChanged.connect(self.update_image_scale_label)
         self.image_scale_entry = QLineEdit(str(self.image_scale_var))
         self.image_scale_entry.setFixedWidth(60)
+        self.image_scale_entry.editingFinished.connect(lambda: self._commit_slider_entry(self.image_scale_entry, self.image_scale_slider, divisor=100))
         scale_layout.addWidget(self.image_scale_slider)
         scale_layout.addWidget(self.image_scale_entry)
         custom_image_layout.addLayout(scale_layout)
@@ -701,38 +711,13 @@ class ConfigUI(QMainWindow):
         self.hollow_gap_slider.valueChanged.connect(self.update_hollow_gap_label)
         self.hollow_gap_entry = QLineEdit(str(self.hollow_gap_var))
         self.hollow_gap_entry.setFixedWidth(60)
+        self.hollow_gap_entry.editingFinished.connect(lambda: self._commit_slider_entry(self.hollow_gap_entry, self.hollow_gap_slider))
         hollow_layout.addWidget(self.hollow_gap_slider, 0, 1)
         hollow_layout.addWidget(self.hollow_gap_entry, 0, 2)
         
-        # 直线长度设置
-        self.hollow_length_label = QLabel(self.t("hollow_length"))
-        hollow_layout.addWidget(self.hollow_length_label, 1, 0)
-        self.hollow_length_var = self.config.get("hollow_length", 30)
-        self.hollow_length_slider = QSlider(Qt.Horizontal)
-        self.hollow_length_slider.setRange(1, 100)
-        self.hollow_length_slider.setValue(int(self.hollow_length_var))
-        self.hollow_length_slider.valueChanged.connect(self.update_hollow_length_label)
-        self.hollow_length_entry = QLineEdit(str(self.hollow_length_var))
-        self.hollow_length_entry.setFixedWidth(60)
-        hollow_layout.addWidget(self.hollow_length_slider, 1, 1)
-        hollow_layout.addWidget(self.hollow_length_entry, 1, 2)
-        
-        # 直线粗细设置
-        self.hollow_thickness_label = QLabel(self.t("hollow_thickness"))
-        hollow_layout.addWidget(self.hollow_thickness_label, 2, 0)
-        self.hollow_thickness_var = self.config.get("hollow_thickness", 2)
-        self.hollow_thickness_slider = QSlider(Qt.Horizontal)
-        self.hollow_thickness_slider.setRange(1, 10)
-        self.hollow_thickness_slider.setValue(int(self.hollow_thickness_var))
-        self.hollow_thickness_slider.valueChanged.connect(self.update_hollow_thickness_label)
-        self.hollow_thickness_entry = QLineEdit(str(self.hollow_thickness_var))
-        self.hollow_thickness_entry.setFixedWidth(60)
-        hollow_layout.addWidget(self.hollow_thickness_slider, 2, 1)
-        hollow_layout.addWidget(self.hollow_thickness_entry, 2, 2)
-        
-        # 中心点大小设置（用于空心十字加点）
+        # 中心点大小设置（用于空心十字加点；直线长度/粗细已去除，改用上方的"大小"/"粗细"滑块）
         self.center_dot_size_label = QLabel(self.t("center_dot_size"))
-        hollow_layout.addWidget(self.center_dot_size_label, 3, 0)
+        hollow_layout.addWidget(self.center_dot_size_label, 1, 0)
         self.center_dot_size_var = self.config.get("center_dot_size", 3)
         self.center_dot_size_slider = QSlider(Qt.Horizontal)
         self.center_dot_size_slider.setRange(1, 10)
@@ -740,8 +725,9 @@ class ConfigUI(QMainWindow):
         self.center_dot_size_slider.valueChanged.connect(self.update_center_dot_size_label)
         self.center_dot_size_entry = QLineEdit(str(self.center_dot_size_var))
         self.center_dot_size_entry.setFixedWidth(60)
-        hollow_layout.addWidget(self.center_dot_size_slider, 3, 1)
-        hollow_layout.addWidget(self.center_dot_size_entry, 3, 2)
+        self.center_dot_size_entry.editingFinished.connect(lambda: self._commit_slider_entry(self.center_dot_size_entry, self.center_dot_size_slider))
+        hollow_layout.addWidget(self.center_dot_size_slider, 1, 1)
+        hollow_layout.addWidget(self.center_dot_size_entry, 1, 2)
         
         settings_layout.addWidget(self.hollow_cross_group, 9, 0, 1, 3)
         
@@ -783,25 +769,38 @@ class ConfigUI(QMainWindow):
         
         main_layout.addWidget(self.settings_group)
         
-        # 右键快捷键 / 关闭到托盘 / 全屏置顶 三个选项同一行
-        options_layout = QHBoxLayout()
+        # 右键快捷键单独一行（勾选框 + 模式下拉框，避免和下面一行挤在一起导致文字被压缩）
+        right_click_layout = QHBoxLayout()
         self.right_click_checkbox = QCheckBox(self.t("right_click_toggle"))
         self.right_click_checkbox.setChecked(self.config.get("right_click_shortcut", False))
         self.right_click_checkbox.stateChanged.connect(self.on_right_click_changed)
         self.right_click_checkbox.setToolTip(self.t("right_click_warning"))
-        options_layout.addWidget(self.right_click_checkbox)
-        
+        right_click_layout.addWidget(self.right_click_checkbox)
+
+        # 右键模式选择：点击切换 / 按住显示 / 按住隐藏
+        self.right_click_mode_combo = QComboBox()
+        self._populate_right_click_mode_combo()
+        self._set_right_click_mode_combo_value(self.config.get("right_click_mode", "click"))
+        self.right_click_mode_combo.currentIndexChanged.connect(self.on_right_click_mode_changed)
+        self.right_click_mode_combo.setVisible(self.config.get("right_click_shortcut", False))
+        right_click_layout.addWidget(self.right_click_mode_combo)
+
+        right_click_layout.addStretch()
+        main_layout.addLayout(right_click_layout)
+
+        # 关闭到托盘 / 全屏置顶 两个选项同一行
+        options_layout = QHBoxLayout()
         self.minimize_to_tray_checkbox = QCheckBox(self.t("minimize_to_tray"))
         self.minimize_to_tray_checkbox.setChecked(self.config.get("minimize_to_tray", False))
         self.minimize_to_tray_checkbox.stateChanged.connect(self.on_minimize_to_tray_changed)
         options_layout.addWidget(self.minimize_to_tray_checkbox)
-        
+
         self.auto_topmost_checkbox = QCheckBox(self.t("auto_topmost_on_fullscreen"))
         self.auto_topmost_checkbox.setChecked(self.config.get("auto_topmost_on_fullscreen", False))
         self.auto_topmost_checkbox.setToolTip(self.t("auto_topmost_hint"))
         self.auto_topmost_checkbox.stateChanged.connect(self.on_auto_topmost_changed)
         options_layout.addWidget(self.auto_topmost_checkbox)
-        
+
         options_layout.addStretch()
         main_layout.addLayout(options_layout)
         
@@ -843,7 +842,8 @@ class ConfigUI(QMainWindow):
         
         self.bg_group = QGroupBox(self.t("ui_background"))
         bg_layout = QGridLayout(self.bg_group)
-        bg_layout.addWidget(QLabel(self.t("bg_opacity")), 0, 0)
+        self.bg_opacity_label = QLabel(self.t("bg_opacity"))
+        bg_layout.addWidget(self.bg_opacity_label, 0, 0)
         self.bg_opacity_slider = QSlider(Qt.Horizontal)
         self.bg_opacity_slider.setRange(0, 100)
         self.bg_opacity_slider.setValue(int(self.config.get("ui_bg_opacity", 0.15) * 100))
@@ -1007,8 +1007,6 @@ class ConfigUI(QMainWindow):
             "opacity": 0.8,
             "position": {"x": "center", "y": "center"},
             "hollow_gap": 0,
-            "hollow_length": 30,
-            "hollow_thickness": 2,
             "center_dot_size": 3
         }
         
@@ -1084,6 +1082,26 @@ class ConfigUI(QMainWindow):
             QMessageBox.critical(self, self.t("error"), self.format_text("cannot_open_folder", error=str(e)))
     
     
+    def _commit_slider_entry(self, entry, slider, divisor=1):
+        """把输入框中手动填写的数值提交给对应滑块，让数值真正生效。
+
+        divisor: 滑块整数值换算成输入框显示值的比例（透明度、图片缩放为100，其余为1）。
+        非法输入、或数值超出滑块范围被钳制后与当前值相同（不会触发 valueChanged）时，
+        都会把输入框重置为滑块当前实际生效的显示值，避免输入框显示和实际配置不一致。
+        """
+        text = entry.text().strip()
+        try:
+            display_value = float(text)
+        except ValueError:
+            entry.setText(str(slider.value() / divisor) if divisor != 1 else str(slider.value()))
+            return
+        raw_value = round(display_value * divisor)
+        clamped = max(slider.minimum(), min(slider.maximum(), raw_value))
+        if clamped == slider.value():
+            entry.setText(str(clamped / divisor) if divisor != 1 else str(clamped))
+        else:
+            slider.setValue(clamped)  # 触发 valueChanged -> update_*_label -> update_crosshair()
+
     def update_size_label(self, value):
         """更新大小标签"""
         self.size_entry.setText(str(value))
@@ -1091,7 +1109,7 @@ class ConfigUI(QMainWindow):
     
     def update_thickness_label(self, value):
         """更新粗细标签"""
-        self.thickness_entry.setText(str(value))
+        self.thickness_entry.setText(str(value / 10.0))
         self.update_crosshair()
     
     def update_opacity_label(self, value):
@@ -1117,10 +1135,11 @@ class ConfigUI(QMainWindow):
     
     def show_crosshair(self):
         """显示准星"""
-        if self.overlay_window is None:
+        is_new_overlay = self.overlay_window is None
+        if is_new_overlay:
             from overlay_window_pyside6 import OverlayWindow
             self.overlay_window = OverlayWindow(self.config)
-        
+
         # 检查窗口是否已经可见，避免重复操作和激活窗口
         if self.overlay_window.isVisible():
             self.overlay_window.updateConfig(self.config)
@@ -1130,13 +1149,17 @@ class ConfigUI(QMainWindow):
             # 使用 show() 而不是 showFullScreen() 来避免激活窗口
             self.overlay_window.show()
             self.overlay_window.updateConfig(self.config)
-        
-        # 设置右键回调（如果启用）
-        if self.config.get("right_click_shortcut", False):
-            self.overlay_window.right_click_callback = self.toggle_crosshair
-        else:
-            self.overlay_window.right_click_callback = None
-        
+
+        # 仅在 overlay 首次创建时（即程序刚启动）按配置注册右键钩子，确保重启后
+        # 已保存的右键设置立即生效。之后不能再无条件重新注册：在"按住显示"模式下，
+        # show_crosshair 本身就是按下时的回调，若每次调用都重新卸载/安装底层鼠标钩子，
+        # 会在右键仍被按住期间触发系统级联回调，导致钩子反复重装并最终使程序崩溃。
+        if is_new_overlay:
+            if self.config.get("right_click_shortcut", False):
+                self._apply_right_click_hook()
+            else:
+                self.overlay_window.unregister_global_mouse_hook()
+
         # 应用全屏自动置顶设置
         if hasattr(self.overlay_window, 'set_auto_topmost_on_fullscreen'):
             self.overlay_window.set_auto_topmost_on_fullscreen(self.config.get("auto_topmost_on_fullscreen", False))
@@ -1223,6 +1246,44 @@ class ConfigUI(QMainWindow):
         value = self.shape_combo.currentData()
         return value if value is not None else "cross"
 
+    # 右键模式值列表（顺序即下拉框显示顺序）；显示文本由语言字符串 right_click_mode_<value> 提供
+    RIGHT_CLICK_MODE_VALUES = ["click", "hold_show", "hold_hide"]
+
+    def _populate_right_click_mode_combo(self):
+        """按当前语言填充右键模式下拉框：显示翻译文本，itemData 存储实际模式值。"""
+        for value in self.RIGHT_CLICK_MODE_VALUES:
+            self.right_click_mode_combo.addItem(self.t(f"right_click_mode_{value}"), value)
+
+    def _refresh_right_click_mode_combo_texts(self):
+        """语言切换时刷新右键模式下拉框各项的显示文本，保持选中值不变。"""
+        for i in range(self.right_click_mode_combo.count()):
+            value = self.right_click_mode_combo.itemData(i)
+            self.right_click_mode_combo.setItemText(i, self.t(f"right_click_mode_{value}"))
+
+    def _set_right_click_mode_combo_value(self, value):
+        """根据实际模式值选中对应下拉项。"""
+        index = self.right_click_mode_combo.findData(value)
+        if index < 0:
+            index = 0
+        self.right_click_mode_combo.setCurrentIndex(index)
+
+    def _get_right_click_mode_value(self):
+        """获取当前选中的实际右键模式值（而非显示文本）。"""
+        value = self.right_click_mode_combo.currentData()
+        return value if value is not None else "click"
+
+    def _apply_right_click_hook(self):
+        """根据当前右键模式，向 overlay 注册对应的全局鼠标钩子回调（自身具备幂等性，可安全重复调用）。"""
+        if not self.overlay_window:
+            return
+        mode = self.config.get("right_click_mode", "click")
+        if mode == "hold_show":
+            self.overlay_window.register_global_mouse_hook(self.show_crosshair, self.hide_crosshair)
+        elif mode == "hold_hide":
+            self.overlay_window.register_global_mouse_hook(self.hide_crosshair, self.show_crosshair)
+        else:
+            self.overlay_window.register_global_mouse_hook(self.toggle_crosshair)
+
     def on_shape_changed(self, shape):
         """形状改变事件"""
         self.update_control_visibility()
@@ -1237,10 +1298,10 @@ class ConfigUI(QMainWindow):
         # 中心点大小控件只在空心十字加点时显示
         is_hollow_cross_dot = self._get_shape_value() == "hollow_cross_dot"
         
-        # 控制中心点大小相关控件的可见性（在hollow_layout的第3行）
-        # 第3行包含：label(0), slider(1), entry(2)
+        # 控制中心点大小相关控件的可见性（在hollow_layout的第1行）
+        # 第1行包含：label(0), slider(1), entry(2)
         for col in [0, 1, 2]:
-            item = self.hollow_cross_group.layout().itemAtPosition(3, col)
+            item = self.hollow_cross_group.layout().itemAtPosition(1, col)
             if item:
                 widget = item.widget()
                 if widget:
@@ -1258,16 +1319,6 @@ class ConfigUI(QMainWindow):
     def update_hollow_gap_label(self, value):
         """更新空心十字中心距离标签"""
         self.hollow_gap_entry.setText(str(value))
-        self.update_crosshair()
-    
-    def update_hollow_length_label(self, value):
-        """更新空心十字直线长度标签"""
-        self.hollow_length_entry.setText(str(value))
-        self.update_crosshair()
-    
-    def update_hollow_thickness_label(self, value):
-        """更新空心十字直线粗细标签"""
-        self.hollow_thickness_entry.setText(str(value))
         self.update_crosshair()
     
     def select_custom_image(self):
@@ -1563,19 +1614,23 @@ class ConfigUI(QMainWindow):
         """右键快捷键选项改变"""
         self.config["right_click_shortcut"] = (state == Qt.CheckState.Checked.value)
         self.save_config()
-        
+        self.right_click_mode_combo.setVisible(self.config["right_click_shortcut"])
+
         # 注册或注销全局鼠标钩子
         if self.overlay_window:
             if self.config["right_click_shortcut"]:
-                # 注册全局鼠标钩子
-                self.overlay_window.register_global_mouse_hook(self.toggle_crosshair)
-                
-                # 显示提示
-                QMessageBox.information(self, self.t("tray_title"), self.t("right_click_enabled_msg"))
+                self._apply_right_click_hook()
             else:
-                # 注销全局鼠标钩子
                 self.overlay_window.unregister_global_mouse_hook()
-    
+
+    def on_right_click_mode_changed(self, index):
+        """右键模式改变（点击切换 / 按住显示 / 按住隐藏）"""
+        self.config["right_click_mode"] = self._get_right_click_mode_value()
+        self.save_config()
+        # 若右键功能当前已启用，立即用新模式重新注册钩子
+        if self.config.get("right_click_shortcut", False):
+            self._apply_right_click_hook()
+
     def on_minimize_to_tray_changed(self, state):
         """关闭到托盘选项改变"""
         self.config["minimize_to_tray"] = (state == Qt.CheckState.Checked.value)
@@ -1641,7 +1696,7 @@ class ConfigUI(QMainWindow):
         """从UI更新配置"""
         self.config["shape"] = self._get_shape_value()
         self.config["size"] = self.size_slider.value()
-        self.config["thickness"] = self.thickness_slider.value()
+        self.config["thickness"] = self.thickness_slider.value() / 10.0
         self.config["opacity"] = self.opacity_slider.value() / 100.0
         
         # 保存自定义图片相关参数
@@ -1649,11 +1704,9 @@ class ConfigUI(QMainWindow):
             self.config["custom_image_path"] = self.image_path_entry.text()
             self.config["custom_image_scale"] = self.image_scale_slider.value() / 100.0
         
-        # 保存空心十字专用参数
+        # 保存空心十字专用参数（直线长度/粗细已去除，统一使用上方的"大小"/"粗细"）
         if self._get_shape_value() in ["hollow_cross", "hollow_cross_dot"]:
             self.config["hollow_gap"] = self.hollow_gap_slider.value()
-            self.config["hollow_length"] = self.hollow_length_slider.value()
-            self.config["hollow_thickness"] = self.hollow_thickness_slider.value()
         
         # 保存中心点大小参数
         if self._get_shape_value() == "hollow_cross_dot":
@@ -1678,12 +1731,11 @@ class ConfigUI(QMainWindow):
         self.thickness_slider.blockSignals(True)
         self.opacity_slider.blockSignals(True)
         self.hollow_gap_slider.blockSignals(True)
-        self.hollow_length_slider.blockSignals(True)
-        self.hollow_thickness_slider.blockSignals(True)
         self.center_dot_size_slider.blockSignals(True)
         self.enable_border_checkbox.blockSignals(True)
         self.language_combo.blockSignals(True)
         self.control_opacity_slider.blockSignals(True)
+        self.right_click_mode_combo.blockSignals(True)
         
         try:
             # 更新静态标签和标题
@@ -1732,6 +1784,10 @@ class ConfigUI(QMainWindow):
             
             # 更新按钮和复选框文本
             self.right_click_checkbox.setText(self.t("right_click_toggle"))
+            self.right_click_checkbox.setChecked(self.config.get("right_click_shortcut", False))
+            self._refresh_right_click_mode_combo_texts()
+            self._set_right_click_mode_combo_value(self.config.get("right_click_mode", "click"))
+            self.right_click_mode_combo.setVisible(self.config.get("right_click_shortcut", False))
             self.minimize_to_tray_checkbox.setText(self.t("minimize_to_tray"))
             self.auto_topmost_checkbox.setText(self.t("auto_topmost_on_fullscreen"))
             self.auto_topmost_checkbox.setToolTip(self.t("auto_topmost_hint"))
@@ -1742,6 +1798,9 @@ class ConfigUI(QMainWindow):
             arrow = "▼" if self.bg_toggle_button.isChecked() else "▶"
             self.bg_toggle_button.setText(f"{self.t('ui_background')} {arrow}")
             self.bg_group.setTitle(self.t("ui_background"))
+            self.bg_opacity_label.setText(self.t("bg_opacity"))
+            self.select_bg_button.setText(self.t("select_bg_image"))
+            self.clear_bg_button.setText(self.t("clear_bg"))
             
             # 更新显示/隐藏按钮文本
             if self.is_shown:
@@ -1766,9 +1825,9 @@ class ConfigUI(QMainWindow):
             self.size_slider.setValue(size)
             self.size_entry.setText(str(size))
             
-            # 更新粗细
-            thickness = int(self.config.get("thickness", 2))
-            self.thickness_slider.setValue(thickness)
+            # 更新粗细（支持小数点，滑块内部按 0.1 粒度存储）
+            thickness = float(self.config.get("thickness", 2))
+            self.thickness_slider.setValue(round(thickness * 10))
             self.thickness_entry.setText(str(thickness))
             
             # 更新透明度
@@ -1784,26 +1843,17 @@ class ConfigUI(QMainWindow):
             self.enable_border_checkbox.setChecked(self.config.get("enable_border", False))
             self.border_settings_button.setVisible(self.config.get("enable_border", False))
             
-            # 更新空心十字专用设置
+            # 更新空心十字专用设置（直线长度/粗细已去除，统一使用上方的"大小"/"粗细"）
             hollow_gap = self.config.get("hollow_gap", 0)
             self.hollow_gap_slider.setValue(hollow_gap)
             self.hollow_gap_entry.setText(str(hollow_gap))
             self.hollow_gap_label.setText(self.t("hollow_gap"))
-            
-            hollow_length = self.config.get("hollow_length", 30)
-            self.hollow_length_slider.setValue(hollow_length)
-            self.hollow_length_entry.setText(str(hollow_length))
-            self.hollow_length_label.setText(self.t("hollow_length"))
-            
-            hollow_thickness = self.config.get("hollow_thickness", 2)
-            self.hollow_thickness_slider.setValue(hollow_thickness)
-            self.hollow_thickness_entry.setText(str(hollow_thickness))
-            self.hollow_thickness_label.setText(self.t("hollow_thickness"))
-            
+
             # 更新中心点大小设置
             center_dot_size = self.config.get("center_dot_size", 3)
             self.center_dot_size_slider.setValue(center_dot_size)
             self.center_dot_size_entry.setText(str(center_dot_size))
+            self.center_dot_size_label.setText(self.t("center_dot_size"))
             
             # 更新快捷键设置
             hotkey = self.config.get("hotkey", "")
@@ -1855,12 +1905,11 @@ class ConfigUI(QMainWindow):
             self.thickness_slider.blockSignals(False)
             self.opacity_slider.blockSignals(False)
             self.hollow_gap_slider.blockSignals(False)
-            self.hollow_length_slider.blockSignals(False)
-            self.hollow_thickness_slider.blockSignals(False)
             self.center_dot_size_slider.blockSignals(False)
             self.enable_border_checkbox.blockSignals(False)
             self.language_combo.blockSignals(False)
             self.control_opacity_slider.blockSignals(False)
+            self.right_click_mode_combo.blockSignals(False)
 
     def apply_theme(self):
         """应用当前主题到整个界面。"""

@@ -20,7 +20,7 @@ def main():
         
         # 设置应用程序信息
         app.setApplicationName("小林の准星")
-        app.setApplicationVersion("3.0.0")
+        app.setApplicationVersion("3.1.0")
         app.setOrganizationName("林晓CCC")
 
         # 设置应用程序图标（使用 FAV 中的高分辨率图标）

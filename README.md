@@ -59,10 +59,10 @@ Crosshair/
 ├── config_ui_pyside6.py        # Main UI (config window)
 ├── overlay_window_pyside6.py   # Overlay (crosshair rendering + mouse hook)
 ├── border_settings_dialog.py   # Border settings dialog
-├── build_v3.0.0.py             # PyInstaller build script (with UPX)
+├── build_v3.1.0.py             # PyInstaller build script (with UPX)
 ├── requirements.txt            # Dependencies
 ├── FAV/                        # App icon assets (favicon_1024.png, app.ico, ...)
-├── 小林の准星.exe              # Prebuilt executable (v3.0.0, built via build_v3.0.0.py)
+├── 小林の准星.exe              # Prebuilt executable (v3.1.0, built via build_v3.1.0.py)
 └── 小林の准星V2.00/            # v2.0.0 release package (legacy, exe named 准星程序.exe)
     ├── 准星程序.exe
     └── 版本说明_v2.0.0.txt
@@ -87,12 +87,25 @@ Configs are stored under `%APPDATA%/CrosshairApp/`, one JSON file per preset. Th
 ## Build
 
 ```bash
-python build_v3.0.0.py
+python build_v3.1.0.py
 ```
 
 This script packages the app into a single-file exe with PyInstaller, then compresses it with UPX (UPX is auto-downloaded if missing). The output is a release folder and a zip.
 
 ## Version History
+
+### v3.1.0
+- New: "Hold right-click to toggle" mode — alongside the existing click-to-toggle, you can now choose "Hold to show" or "Hold to hide"
+- Removed the popup that used to appear when enabling the right-click toggle option
+- Fixed a real crash: holding right-click in "Hold to show" mode could crash the app (the mouse hook was being reinstalled on every press while the button was held, triggering a runaway loop)
+- Hollow cross: removed the separate Line Length / Line Thickness sliders — hollow cross shapes now use the main Size / Thickness sliders instead
+- More vertical spacing between the hollow-cross sliders so they're not cramped together
+- Thickness slider now supports decimals (0.1 increments)
+- Fixed: typing a value directly into the entry box next to a slider (Size, Thickness, Opacity, Image Scale, Center Gap, Center Dot Size) didn't apply — it now commits on Enter/blur, with range clamping and invalid-input recovery
+- Fixed missing English translations for "Hollow Cross Settings", "Center Dot Size", and "Center Gap"
+- Fixed several labels (Center Dot Size, Background Opacity, Select/Clear Background buttons) not refreshing when switching language
+- Fixed deleting a preset occasionally showing a false "delete failed" error even though it succeeded
+- Fixed the build script's UPX compression step silently failing (WinError 2) due to a relative-path issue
 
 ### v3.0.0
 - **Control opacity slider**: a new slider next to "Background Opacity" adjusts the background transparency of all cards / input fields / buttons at once, while the text stays fully opaque

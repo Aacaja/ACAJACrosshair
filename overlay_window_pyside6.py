@@ -11,6 +11,7 @@ from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QImage, QPixmap
 # Windows API 钩子相关
 WH_MOUSE_LL = 14
 WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
 HC_ACTION = 0
 
 # 定义鼠标钩子结构
@@ -32,24 +33,26 @@ MOUSE_HOOK_CALLBACK = ctypes.CFUNCTYPE(
     ctypes.POINTER(MSLLHOOKSTRUCT)
 )
 
-# 全局右键回调函数
-global_right_click_callback = None
+# 全局右键回调函数：按下时触发 down 回调，松开时触发 up 回调（up 回调可为 None，
+# 用于"点击切换"模式；down+up 都设置时用于"按住显示/按住隐藏"模式）
+global_right_down_callback = None
+global_right_up_callback = None
 
 # 保存回调函数引用，防止被垃圾回收
 mouse_hook_callback_ref = None
 
 def mouse_hook_proc(nCode, wParam, lParam):
     """鼠标钩子回调函数"""
-    global global_right_click_callback
-    
+    global global_right_down_callback, global_right_up_callback
+
     try:
-        # 检查是否是右键按下事件
-        if wParam == WM_RBUTTONDOWN and nCode >= 0:
-            if global_right_click_callback:
-                # 使用 QTimer 延迟执行，避免在钩子回调中直接调用
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, global_right_click_callback)
-        
+        if nCode >= 0:
+            # 使用 QTimer 延迟执行，避免在钩子回调中直接调用
+            if wParam == WM_RBUTTONDOWN and global_right_down_callback:
+                QTimer.singleShot(0, global_right_down_callback)
+            elif wParam == WM_RBUTTONUP and global_right_up_callback:
+                QTimer.singleShot(0, global_right_up_callback)
+
         # 继续传递事件（不拦截）
         return ctypes.windll.user32.CallNextHookEx(mouse_hook, nCode, wParam, lParam)
     except:
@@ -493,18 +496,15 @@ class OverlayWindow(QWidget):
         elif shape == "circle":
             self.draw_circle(painter, center, size, thickness, qcolor)
         elif shape == "hollow_cross":
+            # 直线长度/粗细已去除专用设置，统一使用上方的"大小"/"粗细"
             gap_size = self.config.get("hollow_gap", size // 3)
-            line_length = self.config.get("hollow_length", size)
-            line_thickness = self.config.get("hollow_thickness", thickness)
-            self.draw_hollow_cross(painter, center, gap_size, line_length, line_thickness, qcolor)
+            self.draw_hollow_cross(painter, center, gap_size, size, thickness, qcolor)
         elif shape == "hollow_square":
             self.draw_hollow_square(painter, center, size, thickness, qcolor)
         elif shape == "hollow_cross_dot":
             gap_size = self.config.get("hollow_gap", size // 3)
-            line_length = self.config.get("hollow_length", size)
-            line_thickness = self.config.get("hollow_thickness", thickness)
             dot_size = self.config.get("center_dot_size",3)
-            self.draw_hollow_cross_dot(painter, center, gap_size, line_length, line_thickness, dot_size, qcolor)
+            self.draw_hollow_cross_dot(painter, center, gap_size, size, thickness, dot_size, qcolor)
         elif shape == "custom_image":
             self.draw_custom_image(painter, center, opacity)
         
@@ -517,18 +517,34 @@ class OverlayWindow(QWidget):
             painter.fillRect(text_rect.adjusted(-5, -5, 5, 5), QColor(0, 0, 0, 128))
             painter.drawText(10, 10, hint_text)
     
-    def register_global_mouse_hook(self, callback):
-        """注册全局鼠标钩子"""
-        global global_right_click_callback, mouse_hook, mouse_hook_callback_ref
+    def register_global_mouse_hook(self, down_callback, up_callback=None):
+        """注册全局鼠标钩子。
+
+        down_callback: 右键按下时触发。
+        up_callback: 右键松开时触发，可为 None（"点击切换"模式不需要）。
+        若钩子已注册，会先自动注销再重新安装，避免重复调用导致回调堆叠。
+
+        若钩子已经用同一组回调注册过，直接跳过重装。这是必要的防御：
+        "按住显示/隐藏"模式下 down_callback 本身可能再次调用到这里（例如
+        show_crosshair 内部逻辑变化），若在右键仍被按住期间反复卸载/安装
+        底层鼠标钩子，会触发系统级联回调导致钩子越装越快直至程序崩溃。
+        """
+        global global_right_down_callback, global_right_up_callback, mouse_hook, mouse_hook_callback_ref
         try:
+            if mouse_hook and global_right_down_callback == down_callback and global_right_up_callback == up_callback:
+                return
+
+            self.unregister_global_mouse_hook()
+
             # 设置全局回调
-            global_right_click_callback = callback
-            self.right_click_callback = callback
-            
+            global_right_down_callback = down_callback
+            global_right_up_callback = up_callback
+            self.right_click_callback = down_callback
+
             # 创建回调函数并保存引用
             callback_func = MOUSE_HOOK_CALLBACK(mouse_hook_proc)
             mouse_hook_callback_ref = callback_func  # 保存引用防止被垃圾回收
-            
+
             # 注册低级鼠标钩子
             mouse_hook = ctypes.windll.user32.SetWindowsHookExA(
                 WH_MOUSE_LL,
@@ -536,25 +552,26 @@ class OverlayWindow(QWidget):
                 None,
                 0
             )
-            
+
             if mouse_hook:
                 print("全局右键钩子已注册")
             else:
                 print("注册全局右键钩子失败")
-                
+
         except Exception as e:
             print(f"注册全局鼠标钩子出错: {e}")
-    
-    
+
+
     def unregister_global_mouse_hook(self):
         """注销全局鼠标钩子"""
-        global global_right_click_callback, mouse_hook
+        global global_right_down_callback, global_right_up_callback, mouse_hook
         try:
             if mouse_hook:
                 ctypes.windll.user32.UnhookWindowsHookEx(mouse_hook)
                 mouse_hook = None
                 print("全局右键功能已注销")
-            global_right_click_callback = None
+            global_right_down_callback = None
+            global_right_up_callback = None
             self.right_click_callback = None
         except Exception as e:
             print(f"注销全局鼠标钩子出错:{e}")
