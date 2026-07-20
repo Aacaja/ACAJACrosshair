@@ -63,9 +63,6 @@ Crosshair/
 ├── requirements.txt            # Dependencies
 ├── FAV/                        # App icon assets (favicon_1024.png, app.ico, ...)
 ├── 小林の准星.exe              # Prebuilt executable (v3.1.0, built via build_v3.1.0.py)
-└── 小林の准星V2.00/            # v2.0.0 release package (legacy, exe named 准星程序.exe)
-    ├── 准星程序.exe
-    └── 版本说明_v2.0.0.txt
 ```
 
 ## How It Works
