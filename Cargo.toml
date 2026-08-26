@@ -1,0 +1,55 @@
+[package]
+name = "acaja"
+version = "1.0.0"
+edition = "2021"
+description = "ACAJA - Windows crosshair overlay tool"
+authors = ["Aacaja"]
+license = "MIT"
+repository = "https://github.com/liuroland55/CrossHairLIN"
+build = "build.rs"
+
+[dependencies]
+# Windows API (Win32) —— 特性按命名空间裁剪，只编译用到的部分
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]}
+
+# 设置界面（egui 即时模式，编译进单文件 exe）
+eframe = "0.30"
+egui = "0.30"
+
+# 数据与序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 并发与事件
+crossbeam-channel = "0.5"
+
+# 自定义图片准星解码
+image = "0.25"
+
+# 日志
+log = "0.4"
+simplelog = "0.12"
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.dev]
+debug = 1
