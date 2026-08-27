@@ -203,24 +203,24 @@ fn compute_bounds(g: &mut ShapeGeom, p: &ShapeParams) {
     for prim in &g.prims {
         match prim {
             Prim::Line { x1, y1, x2, y2, .. } => {
-                g.min_x = g.min_x.min(x1.min(x2) - m);
-                g.min_y = g.min_y.min(y1.min(y2) - m);
-                g.max_x = g.max_x.max(x1.max(x2) + m);
-                g.max_y = g.max_y.max(y1.max(y2) + m);
+                g.min_x = g.min_x.min((*x1).min(*x2) - m);
+                g.min_y = g.min_y.min((*y1).min(*y2) - m);
+                g.max_x = g.max_x.max((*x1).max(*x2) + m);
+                g.max_y = g.max_y.max((*y1).max(*y2) + m);
             }
             Prim::RectFill { cx, cy, w, h, .. } | Prim::RectStroke { cx, cy, w, h, .. } => {
-                let hw = w / 2.0 + m;
-                let hh = h / 2.0 + m;
-                g.min_x = g.min_x.min(cx - hw);
-                g.min_y = g.min_y.min(cy - hh);
-                g.max_x = g.max_x.max(cx + hw);
-                g.max_y = g.max_y.max(cy + hh);
+                let hw = *w / 2.0 + m;
+                let hh = *h / 2.0 + m;
+                g.min_x = g.min_x.min(*cx - hw);
+                g.min_y = g.min_y.min(*cy - hh);
+                g.max_x = g.max_x.max(*cx + hw);
+                g.max_y = g.max_y.max(*cy + hh);
             }
             Prim::Dot { cx, cy, r, .. } | Prim::Ring { cx, cy, r, .. } => {
-                g.min_x = g.min_x.min(cx - r - m);
-                g.min_y = g.min_y.min(cy - r - m);
-                g.max_x = g.max_x.max(cx + r + m);
-                g.max_y = g.max_y.max(cy + r + m);
+                g.min_x = g.min_x.min(*cx - r - m);
+                g.min_y = g.min_y.min(*cy - r - m);
+                g.max_x = g.max_x.max(*cx + r + m);
+                g.max_y = g.max_y.max(*cy + r + m);
             }
             Prim::PolyFill { pts, .. } => {
                 for pt in pts {

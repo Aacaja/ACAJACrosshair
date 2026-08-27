@@ -6,6 +6,11 @@
 //! - 动态扩散动画由本线程内部状态机驱动（按预设恢复速度衰减），不占主线程；
 //! - 渲染链路：D2D DCRenderTarget → 32bpp DIB → `UpdateLayeredWindow`
 //!   （每帧只提交小窗口区域，交给 DWM 合成）。
+//!
+//! windows-rs 0.58 注意点（实测）：
+//! - 可选句柄参数用 `None`（推断为 `Option<&T>`），不要用 `Some(value)`；
+//! - `Error::from_win32()` 无参数（取线程最后错误码），自定义码用 `Error::from(WIN32_ERROR)`；
+//! - `EndDraw(None, None)`、`DrawBitmap` 只有 5 个参数。
 
 pub mod shapes;
 
@@ -18,7 +23,10 @@ use crossbeam_channel::{Receiver, Sender, unbounded, after, select};
 use log::{info, warn};
 use windows::core::{Interface, PCWSTR, w};
 use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Foundation::{COLORREF, ERROR_INVALID_PARAMETER, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{
+    COLORREF, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, HANDLE, HINSTANCE, HWND, POINT,
+    RECT, SIZE,
+};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
     D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U, ID2D1SimplifiedGeometrySink,
@@ -33,14 +41,14 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, AC_SRC_ALPHA,
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS, HBRUSH, HBITMAP, HDC,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::SystemInformation::GetSystemMetrics;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW, RegisterClassW,
-    SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, WNDCLASSW, WNDPROC,
-    HWND_TOPMOST, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetSystemMetrics,
+    HCURSOR, HICON, HMENU, PeekMessageW, RegisterClassW, SetWindowPos, ShowWindow,
+    TranslateMessage, UpdateLayeredWindow, WNDCLASSW, WNDCLASS_STYLES, HWND_TOPMOST, MSG,
+    PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
     SW_SHOWNOACTIVATE, ULW_ALPHA, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
@@ -208,10 +216,12 @@ fn overlay_thread(rx: Receiver<Msg>) {
 fn pump_messages(hwnd: HWND) {
     unsafe {
         let mut msg = MSG::default();
-        while PeekMessageW(&mut msg, Some(hwnd), 0, 0, PM_REMOVE).as_bool() {
+        // 注意：传 None（Option<&HWND>），窗口气泡消息全部在这个线程
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        let _ = hwnd;
     }
 }
 
@@ -238,7 +248,7 @@ fn render_frame(canvas: &mut Canvas) -> Result<(), windows::core::Error> {
         }
         _ => {
             let geom = shapes::build(preset.shape, &params)
-                .ok_or_else(|| windows::core::Error::from_win32(ERROR_INVALID_PARAMETER))?;
+                .ok_or_else(|| windows::core::Error::from(ERROR_INVALID_PARAMETER))?;
             let r = rotation_safe_radius(&geom) + CANVAS_MARGIN;
             (r * 2.0).ceil().clamp(MIN_CANVAS as f32, MAX_CANVAS as f32) as u32
         }
@@ -253,7 +263,8 @@ fn render_frame(canvas: &mut Canvas) -> Result<(), windows::core::Error> {
 
         let rt: ID2D1RenderTarget = canvas.dc_target.cast()?;
         let _ = rt.BeginDraw();
-        rt.Clear(Some(&(D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }) as *const D2D1_COLOR_F));
+        let clear = D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        rt.Clear(Some(&clear as *const D2D1_COLOR_F));
 
         let cx = canvas.w as f32 / 2.0;
         let cy = canvas.h as f32 / 2.0;
@@ -269,7 +280,7 @@ fn render_frame(canvas: &mut Canvas) -> Result<(), windows::core::Error> {
 
         // ---- 矢量形状（描边层 → 主层） ----
         if let Some(geom) = shapes::build(preset.shape, &params) {
-            let outline = if preset.outline.enabled { &preset.outline } else { &DUMMY_OUTLINE };
+            let outline = if preset.outline.enabled { Some(&preset.outline) } else { None };
             draw_prims(canvas, &rt, &geom, &preset, outline, true)?;
             draw_prims(canvas, &rt, &geom, &preset, outline, false)?;
         }
@@ -291,7 +302,7 @@ fn render_frame(canvas: &mut Canvas) -> Result<(), windows::core::Error> {
             );
         }
 
-        let _ = rt.EndDraw();
+        let _ = rt.EndDraw(None, None);
     }
 
     // ---- 提交到屏幕 ----
@@ -325,104 +336,100 @@ fn render_frame(canvas: &mut Canvas) -> Result<(), windows::core::Error> {
     Ok(())
 }
 
-// 未启用描边时的占位（避免每次构造）
-static DUMMY_OUTLINE: OutlineConfig = OutlineConfig {
-    enabled: false,
-    color: "000000",
-    opacity: 0.0,
-    thickness: 0.0,
-};
-
+#[allow(clippy::too_many_arguments)]
 fn draw_prims(
     canvas: &mut Canvas,
     rt: &ID2D1RenderTarget,
     geom: &ShapeGeom,
     preset: &Preset,
-    outline: &OutlineConfig,
+    outline: Option<&OutlineConfig>,
     outline_pass: bool,
 ) -> Result<(), windows::core::Error> {
     let colors = preset.active_colors();
     let main_color = parse_hex(&preset.color);
-    let use_outline = outline_pass && outline.enabled;
-    let delta = if use_outline { outline.thickness } else { 0.0 };
+    let use_outline = outline_pass && outline.map(|o| o.enabled).unwrap_or(false);
+    let outline = if use_outline { outline } else { None };
+    let delta = outline.map(|o| o.thickness).unwrap_or(0.0);
     let stroke_w = if use_outline { preset.thickness + delta * 2.0 } else { preset.thickness };
-    let op = if use_outline { outline.opacity } else { preset.opacity };
+    let op = if use_outline { outline.unwrap().opacity } else { preset.opacity };
 
-    for prim in &geom.prims {
-        let slot = match prim {
-            Prim::Line { slot, .. }
-            | Prim::RectFill { slot, .. }
-            | Prim::RectStroke { slot, .. }
-            | Prim::Dot { slot, .. }
-            | Prim::Ring { slot, .. }
-            | Prim::PolyFill { slot, .. } => *slot,
-        };
-        let (r, g, b) = if use_outline {
-            parse_hex(&outline.color)
-        } else {
-            slot_color(&colors, main_color, slot)
-        };
-        let b = brush(canvas, rt, (r, g, b), op)?;
+    unsafe {
+        for prim in &geom.prims {
+            let slot = match prim {
+                Prim::Line { slot, .. }
+                | Prim::RectFill { slot, .. }
+                | Prim::RectStroke { slot, .. }
+                | Prim::Dot { slot, .. }
+                | Prim::Ring { slot, .. }
+                | Prim::PolyFill { slot, .. } => *slot,
+            };
+            let (r, g, b) = if use_outline {
+                parse_hex(&outline.unwrap().color)
+            } else {
+                slot_color(&colors, main_color, slot)
+            };
+            let b = brush(canvas, rt, (r, g, b), op)?;
 
-        match prim {
-            Prim::Line { x1, y1, x2, y2, .. } => {
-                let _ = rt.DrawLine(
-                    D2D_POINT_2F { x: *x1, y: *y1 },
-                    D2D_POINT_2F { x: *x2, y: *y2 },
-                    &b, stroke_w, None,
-                );
-            }
-            Prim::RectFill { cx, cy, w, h, .. } => {
-                let r = D2D_RECT_F {
-                    left: cx - w / 2.0 - delta,
-                    top: cy - h / 2.0 - delta,
-                    right: cx + w / 2.0 + delta,
-                    bottom: cy + h / 2.0 + delta,
-                };
-                let _ = rt.FillRectangle(&r, &b);
-            }
-            Prim::RectStroke { cx, cy, w, h, .. } => {
-                let r = D2D_RECT_F {
-                    left: cx - w / 2.0 - delta,
-                    top: cy - h / 2.0 - delta,
-                    right: cx + w / 2.0 + delta,
-                    bottom: cy + h / 2.0 + delta,
-                };
-                let sw = if use_outline { stroke_w + delta } else { stroke_w };
-                let _ = rt.DrawRectangle(&r, &b, sw, None);
-            }
-            Prim::Dot { cx, cy, r, .. } => {
-                let e = D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: *cx, y: *cy },
-                    radiusX: r + delta,
-                    radiusY: r + delta,
-                };
-                let _ = rt.FillEllipse(&e, &b);
-            }
-            Prim::Ring { cx, cy, r, .. } => {
-                let e = D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: *cx, y: *cy },
-                    radiusX: r + delta,
-                    radiusY: r + delta,
-                };
-                let sw = if use_outline { stroke_w + delta } else { stroke_w };
-                let _ = rt.DrawEllipse(&e, &b, sw, None);
-            }
-            Prim::PolyFill { pts, .. } => {
-                if use_outline {
-                    // 描边层：沿多边形边画粗线
-                    for i in 0..pts.len() {
-                        let a = pts[i];
-                        let c = pts[(i + 1) % pts.len()];
-                        let _ = rt.DrawLine(
-                            D2D_POINT_2F { x: a.x, y: a.y },
-                            D2D_POINT_2F { x: c.x, y: c.y },
-                            &b, stroke_w + delta, None,
-                        );
+            match prim {
+                Prim::Line { x1, y1, x2, y2, .. } => {
+                    let _ = rt.DrawLine(
+                        D2D_POINT_2F { x: *x1, y: *y1 },
+                        D2D_POINT_2F { x: *x2, y: *y2 },
+                        &b, stroke_w, None,
+                    );
+                }
+                Prim::RectFill { cx, cy, w, h, .. } => {
+                    let r = D2D_RECT_F {
+                        left: cx - w / 2.0 - delta,
+                        top: cy - h / 2.0 - delta,
+                        right: cx + w / 2.0 + delta,
+                        bottom: cy + h / 2.0 + delta,
+                    };
+                    let _ = rt.FillRectangle(&r, &b);
+                }
+                Prim::RectStroke { cx, cy, w, h, .. } => {
+                    let r = D2D_RECT_F {
+                        left: cx - w / 2.0 - delta,
+                        top: cy - h / 2.0 - delta,
+                        right: cx + w / 2.0 + delta,
+                        bottom: cy + h / 2.0 + delta,
+                    };
+                    let sw = if use_outline { stroke_w + delta } else { stroke_w };
+                    let _ = rt.DrawRectangle(&r, &b, sw, None);
+                }
+                Prim::Dot { cx, cy, r, .. } => {
+                    let e = D2D1_ELLIPSE {
+                        point: D2D_POINT_2F { x: *cx, y: *cy },
+                        radiusX: r + delta,
+                        radiusY: r + delta,
+                    };
+                    let _ = rt.FillEllipse(&e, &b);
+                }
+                Prim::Ring { cx, cy, r, .. } => {
+                    let e = D2D1_ELLIPSE {
+                        point: D2D_POINT_2F { x: *cx, y: *cy },
+                        radiusX: r + delta,
+                        radiusY: r + delta,
+                    };
+                    let sw = if use_outline { stroke_w + delta } else { stroke_w };
+                    let _ = rt.DrawEllipse(&e, &b, sw, None);
+                }
+                Prim::PolyFill { pts, .. } => {
+                    if use_outline {
+                        // 描边层：沿多边形边画粗线
+                        for i in 0..pts.len() {
+                            let a = pts[i];
+                            let c = pts[(i + 1) % pts.len()];
+                            let _ = rt.DrawLine(
+                                D2D_POINT_2F { x: a.x, y: a.y },
+                                D2D_POINT_2F { x: c.x, y: c.y },
+                                &b, stroke_w + delta, None,
+                            );
+                        }
+                    } else {
+                        let path = fill_polygon(&canvas.factory, pts)?;
+                        let _ = rt.FillGeometry(&path, &b, None);
                     }
-                } else {
-                    let path = fill_polygon(&canvas.factory, pts)?;
-                    let _ = rt.FillGeometry(&path, &b, None);
                 }
             }
         }
@@ -437,7 +444,7 @@ fn fill_polygon(
 ) -> Result<ID2D1PathGeometry, windows::core::Error> {
     let path = unsafe { factory.CreatePathGeometry()? };
     let sink = unsafe { path.Open()? };
-    let sink: ID2D1SimplifiedGeometrySink = unsafe { sink.cast()? };
+    let sink: ID2D1SimplifiedGeometrySink = sink.cast()?;
     unsafe {
         sink.BeginFigure(D2D_POINT_2F { x: pts[0].x, y: pts[0].y }, D2D1_FIGURE_BEGIN_FILLED);
         let points: Vec<D2D_POINT_2F> = pts.iter().map(|p| D2D_POINT_2F { x: p.x, y: p.y }).collect();
@@ -477,7 +484,9 @@ fn draw_custom_image(canvas: &mut Canvas, rt: &ID2D1RenderTarget) -> Result<(), 
             right: cx + img.w as f32 / 2.0,
             bottom: cy + img.h as f32 / 2.0,
         };
-        let _ = rt.DrawBitmap(&img.bitmap, Some(&dst), preset.opacity, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+        unsafe {
+            let _ = rt.DrawBitmap(&img.bitmap, Some(&dst), preset.opacity, D2D1_INTERPOLATION_MODE_LINEAR, None);
+        }
     }
     Ok(())
 }
@@ -507,6 +516,7 @@ fn slot_color(colors: &QuadColors, main: (f32, f32, f32), slot: u8) -> (f32, f32
         SLOT_BOTTOM => parse_hex(&colors.bottom),
         SLOT_LEFT => parse_hex(&colors.left),
         SLOT_RIGHT => parse_hex(&colors.right),
+        SLOT_MAIN => main,
         _ => main,
     }
 }
@@ -568,7 +578,7 @@ fn load_image_bitmap(
 // 画布与窗口生命周期
 // ===========================================================================
 
-fn create_canvas() -> Result<Canvas, Box<dyn std::error::Error>> {
+fn create_canvas() -> Result<Canvas, windows::core::Error> {
     unsafe {
         let factory: ID2D1Factory = D2D1CreateFactory(
             D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -591,14 +601,14 @@ fn create_canvas() -> Result<Canvas, Box<dyn std::error::Error>> {
         // ---- 覆盖窗口 ----
         let class_name = WINDOW_CLASS;
         let wc = WNDCLASSW {
-            style: windows::Win32::UI::WindowsAndMessaging::WNDCLASS_STYLES(0),
-            lpfnWndProc: WNDPROC(overlay_wnd_proc),
+            style: WNDCLASS_STYLES(0),
+            lpfnWndProc: overlay_wnd_proc,
             cbClsExtra: 0,
             cbWndExtra: 0,
-            hInstance: GetModuleHandleW(None)?,
-            hIcon: None,
-            hCursor: None,
-            hbrBackground: None,
+            hInstance: HINSTANCE(GetModuleHandleW(PCWSTR::null())?.0),
+            hIcon: HICON(std::ptr::null_mut()),
+            hCursor: HCURSOR(std::ptr::null_mut()),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
             lpszMenuName: PCWSTR::null(),
             lpszClassName: class_name,
         };
@@ -615,7 +625,8 @@ fn create_canvas() -> Result<Canvas, Box<dyn std::error::Error>> {
             None, None, None, None,
         )?;
 
-        SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE).ok();
+        // 初始：置顶 + 不激活（HWND_TOPMOST 直接传，不要 Some）
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE).ok();
 
         let (hdc, hbmp, bits, w, h) = create_dib(MIN_CANVAS, MIN_CANVAS)?;
 
@@ -641,7 +652,10 @@ fn create_canvas() -> Result<Canvas, Box<dyn std::error::Error>> {
 }
 
 /// 32bpp 顶向下 DIB + 内存 DC
-unsafe fn create_dib(w: u32, h: u32) -> Result<(HDC, HBITMAP, *mut u8, u32, u32), Box<dyn std::error::Error>> {
+unsafe fn create_dib(
+    w: u32,
+    h: u32,
+) -> Result<(HDC, HBITMAP, *mut u8, u32, u32), windows::core::Error> {
     let mut bmi: BITMAPINFO = std::mem::zeroed();
     bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
     bmi.bmiHeader.biWidth = w as i32;
@@ -651,18 +665,29 @@ unsafe fn create_dib(w: u32, h: u32) -> Result<(HDC, HBITMAP, *mut u8, u32, u32)
     bmi.bmiHeader.biCompression = BI_RGB.0;
 
     let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbmp = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+    let hbmp = CreateDIBSection(
+        HDC(std::ptr::null_mut()),
+        &bmi,
+        DIB_RGB_COLORS,
+        &mut bits,
+        HANDLE(std::ptr::null_mut()),
+        0,
+    )?;
 
     let hdc = CreateCompatibleDC(None);
     if hdc.is_invalid() {
         let _ = DeleteObject(hbmp);
-        return Err("CreateCompatibleDC 失败".into());
+        return Err(windows::core::Error::from(ERROR_INVALID_HANDLE));
     }
     SelectObject(hdc, hbmp);
     Ok((hdc, hbmp, bits as *mut u8, w, h))
 }
 
-fn ensure_canvas_size(canvas: &mut Canvas, w: u32, h: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_canvas_size(
+    canvas: &mut Canvas,
+    w: u32,
+    h: u32,
+) -> Result<(), windows::core::Error> {
     unsafe {
         if !canvas.hbmp.is_invalid() {
             let _ = DeleteObject(canvas.hbmp);
@@ -670,7 +695,10 @@ fn ensure_canvas_size(canvas: &mut Canvas, w: u32, h: u32) -> Result<(), Box<dyn
         if !canvas.hdc.is_invalid() {
             let _ = DeleteDC(canvas.hdc);
         }
-        let (hdc, hbmp, bits, nw, nh) = create_dib(w.max(MIN_CANVAS).min(MAX_CANVAS), h.max(MIN_CANVAS).min(MAX_CANVAS))?;
+        let (hdc, hbmp, bits, nw, nh) = create_dib(
+            w.max(MIN_CANVAS).min(MAX_CANVAS),
+            h.max(MIN_CANVAS).min(MAX_CANVAS),
+        )?;
         canvas.hdc = hdc;
         canvas.hbmp = hbmp;
         canvas.bits = bits;
@@ -708,8 +736,8 @@ impl Canvas {
 /// 主屏中心（S3 起接入多显示器/前台窗口）
 pub fn primary_screen_center() -> (i32, i32) {
     unsafe {
-        let w = GetSystemMetrics(0); // SM_CXSCREEN
-        let h = GetSystemMetrics(1); // SM_CYSCREEN
+        let w = GetSystemMetrics(SM_CXSCREEN);
+        let h = GetSystemMetrics(SM_CYSCREEN);
         (w / 2, h / 2)
     }
 }
@@ -729,7 +757,12 @@ mod tests {
 
     #[test]
     fn quad_slot_colors() {
-        let q = QuadColors { top: "#00FF00".into(), bottom: "#00FFFF".into(), left: "#0000FF".into(), right: "#FF00FF".into() };
+        let q = QuadColors {
+            top: "#00FF00".into(),
+            bottom: "#00FFFF".into(),
+            left: "#0000FF".into(),
+            right: "#FF00FF".into(),
+        };
         assert_eq!(slot_color(&q, (1.0, 0.0, 0.0), SLOT_TOP), (0.0, 1.0, 0.0));
         assert_eq!(slot_color(&q, (1.0, 0.0, 0.0), SLOT_BOTTOM), (0.0, 1.0, 1.0));
         assert_eq!(slot_color(&q, (1.0, 0.0, 0.0), SLOT_LEFT), (0.0, 0.0, 1.0));
