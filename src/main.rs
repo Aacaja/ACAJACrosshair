@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use log::{info, warn};
 use windows::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, ERROR_ALREADY_EXISTS, HANDLE,
@@ -94,14 +94,13 @@ impl MainState {
     }
 
     /// 检测共享 preset 是否被 UI 更新（版本号变化 → 重同步热键）
-    fn sync_from_ui(&mut self) {
-        let (version, preset) = {
-            let r = self.shared.read().unwrap();
-            (r.version, r.preset.clone())
-        };
+    fn sync_from_ui(&mut self, gamepad_cfg: &Arc<RwLock<acaja::input::gamepad::RuntimeGamepadCfg>>) {
+        let version = self.shared.read().unwrap().version;
         if version != self.last_version {
             self.last_version = version;
             self.apply_hotkeys();
+            let p = self.preset();
+            *gamepad_cfg.write().unwrap() = acaja::input::gamepad::RuntimeGamepadCfg::from_preset(&p);
         }
     }
 
@@ -245,6 +244,111 @@ fn create_message_window() -> HWND {
 // 消息线程（托盘/热键/前台检测/RawInput/手柄 全部在此）
 // ===========================================================================
 
+/// 前台事件处理（自动切预设 / 窗口吸附）
+fn handle_fg_event(state: &mut MainState, fg: FgEvent) {
+    match fg {
+        FgEvent::Changed { exe, .. } => {
+            state.fg_exe = exe.clone();
+            let binding = {
+                let store = state.store.lock().unwrap();
+                store
+                    .app
+                    .game_bindings
+                    .iter()
+                    .find(|b| b.exe.eq_ignore_ascii_case(&exe))
+                    .map(|b| b.preset.clone())
+            };
+            if let Some(preset_name) = binding {
+                let current = { state.store.lock().unwrap().active_name() };
+                if current != preset_name
+                    && state.store.lock().unwrap().activate(&preset_name)
+                {
+                    info!("前台 {exe} → 自动切换预设 {preset_name}");
+                    state.reload_preset();
+                }
+            }
+        }
+        FgEvent::Moved { rect } => {
+            let p = state.preset();
+            if p.snap_to_window {
+                let pos = snap_position(rect);
+                state.overlay.move_to(pos);
+            }
+        }
+    }
+}
+
+/// 消息泵批处理（托盘/热键/退出信号）；返回 true = 应退出消息线程
+fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
+    let mut exit_now = false;
+    unsafe {
+        let mut msg = MSG::default();
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            if msg.message == WM_QUIT {
+                info!("收到 WM_QUIT");
+                acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                if acaja::ui::UI_OPEN.load(Ordering::SeqCst) {
+                    if let Some(ctx) = UI_CTX.get() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                } else {
+                    quit.store(true, Ordering::SeqCst);
+                }
+                exit_now = true;
+                break;
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+
+            match msg.message {
+                WM_HOTKEY => {
+                    let id = (msg.wParam.0 as u32) & 0xFFFF;
+                    if id == HOTKEY_ID_TOGGLE {
+                        state.toggle_visible();
+                    } else if id == HOTKEY_ID_NEXT_PRESET {
+                        state.cycle_preset();
+                    }
+                }
+                WM_TRAYICON => {
+                    let what = (msg.lParam.0 as u32) & 0xFFFF;
+                    if what == WM_LBUTTONDBLCLK {
+                        state.toggle_visible();
+                    } else if what == WM_CONTEXTMENU {
+                        let mut pt = windows::Win32::Foundation::POINT::default();
+                        let _ = GetCursorPos(&mut pt);
+                        let cmd = state
+                            .tray
+                            .as_mut()
+                            .and_then(|t| t.popup_menu(pt.x, pt.y, state.hwnd));
+                        match cmd {
+                            Some(CMD_TOGGLE) => state.toggle_visible(),
+                            Some(CMD_SETTINGS) => {
+                                let _ = acaja::ui::show_settings_window();
+                            }
+                            Some(CMD_QUIT) => {
+                                info!("托盘退出");
+                                acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                                if acaja::ui::UI_OPEN.load(Ordering::SeqCst) {
+                                    if let Some(ctx) = UI_CTX.get() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+                                } else {
+                                    quit.store(true, Ordering::SeqCst);
+                                }
+                                exit_now = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    exit_now
+}
+
 fn msg_thread_main(
     store: Arc<Mutex<PresetStore>>,
     overlay: OverlayHandle,
@@ -307,120 +411,33 @@ fn msg_thread_main(
     state.full_update();
     info!("消息线程就绪，准星已显示");
 
+    // ---- 事件驱动主循环（v1.0.8：CPU 优化） ----
+    // 手柄/前台事件即时响应（阻塞式 select）；消息泵（托盘/热键）走低频节拍。
     loop {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        state.sync_from_ui();
+        let tick_ms = if acaja::ui::UI_OPEN.load(Ordering::SeqCst) { 10 } else { 50 };
+        let tick = crossbeam_channel::after(Duration::from_millis(tick_ms));
 
-        // ---- 消息泵（非阻塞 + 事件轮询节拍） ----
-        unsafe {
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT {
-                    info!("收到 WM_QUIT");
-                    acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
-                    if acaja::ui::UI_OPEN.load(Ordering::SeqCst) {
-                        if let Some(ctx) = UI_CTX.get() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    } else {
-                        quit.store(true, Ordering::SeqCst);
-                    }
+        select! {
+            recv(gamepad_rx) -> ev => {
+                if let Ok(ev) = ev {
+                    state.on_gamepad(ev);
+                }
+            }
+            recv(fg_rx) -> fg => {
+                if let Ok(fg) = fg {
+                    handle_fg_event(&mut state, fg);
+                }
+            }
+            recv(tick) -> _ => {
+                if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-
-                match msg.message {
-                    WM_HOTKEY => {
-                        let id = (msg.wParam.0 as u32) & 0xFFFF;
-                        if id == HOTKEY_ID_TOGGLE {
-                            state.toggle_visible();
-                        } else if id == HOTKEY_ID_NEXT_PRESET {
-                            state.cycle_preset();
-                        }
-                    }
-                    WM_TRAYICON => {
-                        let what = (msg.lParam.0 as u32) & 0xFFFF;
-                        if what == WM_LBUTTONDBLCLK {
-                            state.toggle_visible();
-                        } else if what == WM_CONTEXTMENU {
-                            let mut pt = windows::Win32::Foundation::POINT::default();
-                            let _ = GetCursorPos(&mut pt);
-                            let cmd = state
-                                .tray
-                                .as_mut()
-                                .and_then(|t| t.popup_menu(pt.x, pt.y, state.hwnd));
-                            match cmd {
-                                Some(CMD_TOGGLE) => state.toggle_visible(),
-                                Some(CMD_SETTINGS) => {
-                                    // UI 隐藏（后台运行）时恢复显示；UI 已退出则无窗口可开
-                                    let _ = acaja::ui::show_settings_window();
-                                }
-                                Some(CMD_QUIT) => {
-                                    info!("托盘退出");
-                                    acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
-                                    if acaja::ui::UI_OPEN.load(Ordering::SeqCst) {
-                                        if let Some(ctx) = UI_CTX.get() {
-                                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                        }
-                                    } else {
-                                        quit.store(true, Ordering::SeqCst);
-                                    }
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
+                state.sync_from_ui(&gamepad_cfg);
+                if pump_message_batch(&mut state, &quit) {
+                    break;
                 }
             }
         }
-
-        // ---- 前台事件 ----
-        while let Ok(fg) = fg_rx.try_recv() {
-            match fg {
-                FgEvent::Changed { exe, .. } => {
-                    state.fg_exe = exe.clone();
-                    let binding = {
-                        let store = state.store.lock().unwrap();
-                        store
-                            .app
-                            .game_bindings
-                            .iter()
-                            .find(|b| b.exe.eq_ignore_ascii_case(&exe))
-                            .map(|b| b.preset.clone())
-                    };
-                    if let Some(preset_name) = binding {
-                        let current = { state.store.lock().unwrap().active_name() };
-                        if current != preset_name
-                            && state.store.lock().unwrap().activate(&preset_name)
-                        {
-                            info!("前台 {exe} → 自动切换预设 {preset_name}");
-                            state.reload_preset();
-                        }
-                    }
-                }
-                FgEvent::Moved { rect } => {
-                    let p = state.preset();
-                    if p.snap_to_window {
-                        let pos = snap_position(rect);
-                        state.overlay.move_to(pos);
-                    }
-                }
-            }
-        }
-
-        // ---- 手柄事件 ----
-        while let Ok(ev) = gamepad_rx.try_recv() {
-            state.on_gamepad(ev);
-        }
-
-        // 空闲节拍：UI 打开时 10ms（界面响应），UI 关闭后 50ms（省电）
-        let tick_ms = if acaja::ui::UI_OPEN.load(Ordering::SeqCst) { 10 } else { 50 };
-        std::thread::sleep(Duration::from_millis(tick_ms));
     }
 
     // ---- 清理 ----
@@ -519,10 +536,15 @@ fn main() {
     info!("当前预设：{}", store.lock().unwrap().active_name());
 
     // ---- 共享预设仓库（UI ↔ 消息线程同步，v1.0.4） ----
+    let initial_preset = Arc::new(store.lock().unwrap().get_active().clone());
     let shared: Arc<RwLock<SharedPreset>> = Arc::new(RwLock::new(SharedPreset {
         version: 1,
-        preset: Arc::new(store.lock().unwrap().get_active().clone()),
+        preset: initial_preset.clone(),
     }));
+    let gamepad_cfg: Arc<RwLock<acaja::input::gamepad::RuntimeGamepadCfg>> =
+        Arc::new(RwLock::new(acaja::input::gamepad::RuntimeGamepadCfg::from_preset(
+            &initial_preset,
+        )));
 
     // ---- 覆盖层 ----
     let (overlay, overlay_thread) = acaja::overlay::start();
@@ -538,7 +560,8 @@ fn main() {
             let stop = stop.clone();
             let quit = quit.clone();
             let shared = shared.clone();
-            move || msg_thread_main(store, overlay, stop, quit, shared)
+            let gamepad_cfg = gamepad_cfg.clone();
+            move || msg_thread_main(store, overlay, stop, quit, shared, gamepad_cfg)
         })
         .expect("spawn msg thread");
 
