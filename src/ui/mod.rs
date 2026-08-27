@@ -82,11 +82,22 @@ pub fn run(
     shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
     title: &'static str,
 ) -> eframe::Result<()> {
+    // 窗口图标：内置品牌 A 图标（64px PNG → egui IconData）
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size([760.0, 920.0])
+        .with_min_inner_size([620.0, 640.0])
+        .with_title(title);
+    if let Ok(im) = image::load_from_memory(include_bytes!("../../assets/icons/ACAJA_64.png")) {
+        let rgba = im.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        viewport = viewport.with_icon(Arc::new(egui::IconData {
+            rgba: rgba.into_raw(),
+            width: w,
+            height: h,
+        }));
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 920.0])
-            .with_min_inner_size([620.0, 640.0])
-            .with_title(title),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

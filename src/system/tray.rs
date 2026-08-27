@@ -7,7 +7,7 @@
 //! - `CreatePopupMenu() -> Result<HMENU>`、`AppendMenuW(hmenu, MENU_ITEM_FLAGS, usize, PCWSTR) -> Result<()>`
 //! - `TrackPopupMenu(hmenu, TPM_RETURNCMD, x, y, 0, hwnd, None) -> BOOL`（wam.rs:3186）
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{HBITMAP, HDC};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_MESSAGE, NIF_ICON,
@@ -114,8 +114,23 @@ impl Tray {
     }
 }
 
-/// 从 .ico 文件加载图标；失败时自绘红色十字
+/// 加载图标：优先 exe 内嵌资源（品牌 A 图标），其次 .ico 文件，最后自绘字母 A。
 fn load_icon(path: &str) -> Option<HICON> {
+    // 1) exe 资源图标（winres 植入的第一个图标，资源 ID = 1）
+    let hinst = hinstance();
+    if let Ok(h) = unsafe {
+        LoadImageW(
+            Some(hinst),
+            windows::core::PCWSTR(1 as *const u16),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_DEFAULTSIZE,
+        )
+    } {
+        return Some(HICON(h.0));
+    }
+    // 2) .ico 文件
     let mut wide: Vec<u16> = path.encode_utf16().collect();
     wide.push(0);
     if let Ok(h) = unsafe {
@@ -130,20 +145,26 @@ fn load_icon(path: &str) -> Option<HICON> {
     } {
         return Some(HICON(h.0));
     }
-    draw_cross_icon() 
+    // 3) 自绘字母 A
+    draw_a_icon()
 }
 
-/// 自绘一个 32x32 红色十字图标（CreateDIBSection 写像素 → CreateIconIndirect）
-fn draw_cross_icon() -> Option<HICON> {
+/// 当前模块实例句柄
+fn hinstance() -> HINSTANCE {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    unsafe { HINSTANCE(GetModuleHandleW(windows::core::PCWSTR::null()).unwrap_or_default().0) }
+}
+
+/// 自绘 32x32 字母 A 图标（透明底白色 A，任务栏深色下清晰）
+fn draw_a_icon() -> Option<HICON> {
     use windows::Win32::Graphics::Gdi::{CreateDIBSection, DeleteObject, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
     unsafe {
-
         let mut bmi: BITMAPINFO = std::mem::zeroed();
         bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
         bmi.bmiHeader.biWidth = 32;
-        bmi.bmiHeader.biHeight = -32; // 顶向下
+        bmi.bmiHeader.biHeight = -32;
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB.0;
@@ -159,23 +180,30 @@ fn draw_cross_icon() -> Option<HICON> {
         )
         .ok()?;
 
-        // 画十字：红色像素，中心 4x4 透明
+        // 字母 A：顶点 (16,4) 左底 (7,26) 右底 (25,26)；横杠两段（中空缺口）
         let px = bits_ptr as *mut u32;
-        for y in 0..32 {
-            for x in 0..32 {
-                let on_cross = (x >= 13 && x < 19) || (y >= 13 && y < 19);
-                let center = (x >= 14 && x < 18) && (y >= 14 && y < 18);
-                let masked = on_cross && !center;
-                let v: u32 = if masked {
-                    0xFF0000FF // BGRA 红
-                } else {
-                    0x00000000
-                };
+        let dist_seg = |pxx: f32, pyy: f32, x1: f32, y1: f32, x2: f32, y2: f32| -> f32 {
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let len2 = dx * dx + dy * dy;
+            let t = (((pxx - x1) * dx + (pyy - y1) * dy) / len2).clamp(0.0, 1.0);
+            let cx = x1 + t * dx;
+            let cy = y1 + t * dy;
+            ((pxx - cx).powi(2) + (pyy - cy).powi(2)).sqrt()
+        };
+        for y in 0..32i32 {
+            for x in 0..32i32 {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let stroke = |a: (f32, f32, f32, f32)| dist_seg(fx, fy, a.0, a.1, a.2, a.3) < 2.3;
+                let on = stroke((16.0, 4.0, 7.0, 26.0))
+                    || stroke((16.0, 4.0, 25.0, 26.0))
+                    || (fx > 8.0 && fx < 15.0 && stroke((8.0, 20.0, 24.0, 20.0)))
+                    || (fx > 16.0 && fx < 24.0 && stroke((8.0, 20.0, 24.0, 20.0)));
+                let v: u32 = if on { 0xFFFFFFFF } else { 0x00000000 }; // BGRA 白
                 *px.add((y * 32 + x) as usize) = v;
             }
         }
 
-        // 掩码位图：全 1（不透明区域）+ 中心 0
         let mut mask_bmi: BITMAPINFO = std::mem::zeroed();
         mask_bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
         mask_bmi.bmiHeader.biWidth = 32;
@@ -201,9 +229,10 @@ fn draw_cross_icon() -> Option<HICON> {
             hbmMask: HBITMAP(hbmp_mask.0),
             hbmColor: hbmp,
         };
-        let icon = unsafe { CreateIconIndirect(&info) }.ok();
+        let icon = CreateIconIndirect(&info).ok();
         let _ = DeleteObject(HGDIOBJ(hbmp.0));
         let _ = DeleteObject(HGDIOBJ(hbmp_mask.0));
         icon
     }
 }
+
