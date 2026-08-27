@@ -81,6 +81,7 @@ fn extract_first_font(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ab_glyph::Font as _;
 
     /// 构造一个最小合法 TTC 结构（ttcf 头 + 单字体偏移），校验提取逻辑
     #[test]
