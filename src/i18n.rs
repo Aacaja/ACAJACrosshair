@@ -169,12 +169,12 @@ mod tests {
     fn all_strings_present_in_both_langs() {
         let zh = Lang::Zh.strings();
         let en = Lang::En.strings();
-        // 逐字段比对非空与内容差异（避免某语言漏填）
+        // 逐字段比对非空与内容差异（避免某语言漏填；品牌名除外）
         let zh_vec: Vec<&str> = vec![
-            zh.app_name, zh.tray_show_hide, zh.preset_new, zh.ads_hold_hide,
+            zh.tray_show_hide, zh.preset_new, zh.ads_hold_hide,
         ];
         let en_vec: Vec<&str> = vec![
-            en.app_name, en.tray_show_hide, en.preset_new, en.ads_hold_hide,
+            en.tray_show_hide, en.preset_new, en.ads_hold_hide,
         ];
         assert_eq!(zh_vec.len(), en_vec.len());
         for (z, e) in zh_vec.iter().zip(en_vec.iter()) {
