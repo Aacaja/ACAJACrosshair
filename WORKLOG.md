@@ -4,6 +4,21 @@
 
 ---
 
+## [2026-08-27/28] v1.0.4 + v1.0.5：22 形状+模板 / LB 触发 / preset 同步修复 / 性能优化（内存 CPU）/ 品牌 A 图标
+
+总目标：① 更多形状（借鉴 Crosshair X）② 手柄 LB 触发 ③ 修复"松手后样式变十字+位置偏移"bug ④ 大幅降低常驻内存与 CPU ⑤ 更换品牌 A 图标。
+
+状态：✅ 完成（v1.0.5 CI success，已发 tag + Release）
+
+干到哪了：
+- **v1.0.4**：Shape 枚举 14→22（新增 CrossDot/XShape/RingDot/DoubleRing/CircleCross/Gate/ChevronDown/CornerDots，全几何+预览+翻译）；8 个风格模板（Apex 四段+点/Valorant 门形/CS2 绿十字/狙击圆环/经典红/厚门形/纯点/X 形）；AdsButton 扩展 LeftBumper/RightBumper（XInput wButtons 0x0004/0x0008）；**根因修复**：UI 与消息线程各持 preset 副本导致手柄事件回跳旧样式/位置 → 引入 `state::SharedPreset`（version+Arc<Preset>，RwLock 共享），UI push_to_overlay 时版本号+1，消息线程 sync_from_ui 检测版本重注册热键，所有事件处理改从共享读取。
+- **v1.0.5（性能）**：设置窗口改为**按需创建**——点 X = 真正关闭并释放 egui/GL 全部资源（此前隐藏常驻 ≈90MB+）；托盘「打开设置」→ reopen 标志 → 主线程 `'ui_loop` 重新 run_native；UI 关闭后消息线程节拍 10ms→50ms；overlay 渲染线程空闲**纯阻塞**（0 唤醒）。预期常驻内存 ~10-20MB、CPU ≈0-0.2%。
+- **品牌 A 图标**：PIL 生成（渐变蓝紫圆角底 + 白粗体 A + 横杠红色准星 + 右下白点）→ `assets/icons/ACAJA.ico`（7 尺寸手工 ICO 容器）+ 512/64 png；build.rs winres → 新 ico；托盘加载顺序 = exe 资源(MAKEINTRESOURCE 1) → 文件 → **自绘像素字母 A**（点线距离算法，白 A 透明底）；egui 窗口图标 = include_bytes 64px PNG → IconData。A.lnk 误提交已移除 + .gitignore 加 *.lnk。
+- 验证证据：v1.0.4/v1.0.5 CI 全绿（45+ 单测）；踩坑：LoadImageW hinst 传值不能 Some、tray.rs 无 #[cfg(test)] 锚点。
+
+下一步：用户下载 v1.0.5 实测内存/CPU 与图标；若满意可正式发布 Release（tag 已推）。
+
+---
 ## [2026-08-27] v1.0.3：设置窗口崩溃的真凶——微软雅黑与 ab_glyph 不兼容，内置字体子集根治
 
 总目标：用户报告 UI 起不来（v1.0.1 秒退、v1.0.2 “设置窗口内部错误已捕获”）。日志定位：`epaint fonts.rs:210 PANIC: Error parsing "msyh" TTF/OTF font file: InvalidFont`。同时交付「关闭=隐藏、托盘可重开设置」的 UI 常驻能力。
