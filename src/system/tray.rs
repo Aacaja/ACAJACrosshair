@@ -135,7 +135,7 @@ fn load_icon(path: &str) -> Option<HICON> {
 
 /// 自绘一个 32x32 红色十字图标（CreateDIBSection 写像素 → CreateIconIndirect）
 fn draw_cross_icon() -> Option<HICON> {
-    use windows::Win32::Graphics::Gdi::{CreateDIBSection, DeleteObject, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS};
+    use windows::Win32::Graphics::Gdi::{CreateDIBSection, DeleteObject, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
     unsafe {
