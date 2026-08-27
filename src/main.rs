@@ -118,7 +118,6 @@ impl MainState {
         };
         if version != self.last_version {
             self.last_version = version;
-            self.preset_arc = Some(preset);
             self.apply_hotkeys();
         }
     }
@@ -419,7 +418,8 @@ fn msg_thread_main(
                     }
                 }
                 FgEvent::Moved { rect } => {
-                    if state.preset.snap_to_window {
+                    let p = state.preset();
+                    if p.snap_to_window {
                         let pos = snap_position(rect);
                         state.overlay.move_to(pos);
                     }
