@@ -135,12 +135,10 @@ fn load_icon(path: &str) -> Option<HICON> {
 
 /// 自绘一个 32x32 红色十字图标（CreateDIBSection 写像素 → CreateIconIndirect）
 fn draw_cross_icon() -> Option<HICON> {
+    use windows::Win32::Graphics::Gdi::{CreateDIBSection, DeleteObject, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
     unsafe {
-        use windows::Win32::Graphics::Gdi::{
-            CreateDIBSection, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
-        };
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 
         let mut bmi: BITMAPINFO = std::mem::zeroed();
         bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -204,8 +202,8 @@ fn draw_cross_icon() -> Option<HICON> {
             hbmColor: hbmp,
         };
         let icon = unsafe { CreateIconIndirect(&info) }.ok();
-        let _ = DeleteObject(hbmp);
-        let _ = DeleteObject(hbmp_mask);
+        let _ = DeleteObject(HGDIOBJ(hbmp.0));
+        let _ = DeleteObject(HGDIOBJ(hbmp_mask.0));
         icon
     }
 }

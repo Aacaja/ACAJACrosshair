@@ -358,6 +358,7 @@ impl AcajaApp {
             });
         }
     }
+}
 
 /// 颜色编辑行：色块 + hex 输入（静态函数避免 self 双重借用）
 fn color_row_ui(
@@ -391,6 +392,8 @@ fn color_row_ui(
         }
     });
 }
+
+impl AcajaApp {
 
     fn dynamic_ui(&mut self, ui: &mut Ui) {
         Self::section_title(ui, t(self.lang, "dynamic"));
