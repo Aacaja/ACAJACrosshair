@@ -455,7 +455,9 @@ fn main() {
     if let Some(mut t) = state.tray.take() {
         t.remove();
     }
-    acaja::system::foreground::stop_fg_watcher(fg_hook);
+    if let Some(h) = fg_hook {
+        acaja::system::foreground::stop_fg_watcher(h);
+    }
     overlay.close();
     let _ = overlay_thread.join();
     info!("ACAJA 已退出");
