@@ -279,7 +279,7 @@ fn handle_fg_event(state: &mut MainState, fg: FgEvent) {
 }
 
 /// 消息泵批处理（托盘/热键/退出信号）；返回 true = 应退出消息线程
-fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
+fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>, reopen: &Arc<AtomicBool>) -> bool {
     let mut exit_now = false;
     unsafe {
         let mut msg = MSG::default();
@@ -434,7 +434,7 @@ fn msg_thread_main(
                     break;
                 }
                 state.sync_from_ui(&gamepad_cfg);
-                if pump_message_batch(&mut state, &quit) {
+                if pump_message_batch(&mut state, &quit, &reopen) {
                     break;
                 }
             }
@@ -457,6 +457,10 @@ fn msg_thread_main(
 // ===========================================================================
 
 fn init_logging() -> Option<PathBuf> {
+    // v1.0.9：发行版（release）不生成日志文件；debug 构建保留（开发调试用）
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     let dir = acaja::appdata_dir().ok()?;
     std::fs::create_dir_all(&dir).ok()?;
     let log_path = dir.join("acaja.log");
