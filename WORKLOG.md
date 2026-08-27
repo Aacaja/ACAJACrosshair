@@ -4,6 +4,21 @@
 
 ---
 
+## [2026-08-28] v1.0.9：后台运行=真关窗（解决隐藏后 CPU 6%）+ 发行版关闭日志
+
+总目标：① 修「点后台运行后 CPU 回到 6%」（隐藏窗口的渲染循环仍空转）② 发行版不生成日志文件。
+
+状态：✅ 完成（v1.0.9 CI success，release assets=3）
+
+干到哪了：
+- **根因**：ViewportCommand::Visible(false) 隐藏窗口后 eframe 渲染循环仍以 60fps 后台空转（隐藏窗口未停渲染）。用户在设置窗开着时测不到（事件驱动低占用），点后台运行反而暴露。
+- **修复**：「后台运行」= 置 `BACKGROUND_REQUESTED` + 真正 Close（释放全部 egui/GL）；main.rs 恢复 UI 生命周期循环：X=退出 / 后台运行=关窗后等待 recover（托盘「打开设置」→ reopen → 重建窗口）或 quit（托盘退出）。msg_thread_main 与 pump_message_batch 增加 reopen 参数（修复脚本替换伤到 pump_message_batch 的编译错误）。
+- **日志**：`init_logging` 在 `cfg!(debug_assertions)` 条件下才建文件日志 → release 版不产生 acaja.log；debug 构建保留。
+- 验证证据：commit a997c78 → CI success；v1.0.9 release 3 资产。
+
+下一步：用户实测后台运行 CPU ~0%；readme 待同步「后台运行=关窗」语义。
+
+---
 ## [2026-08-28] v1.0.8：LB/RB 触发动态生效 + CPU 事件驱动化（6% → <1%）
 
 总目标：① 修"设了 LB 仍扳机触发"（触发源是启动参数，UI 改动不生效）② CPU 6% 降到最小。
