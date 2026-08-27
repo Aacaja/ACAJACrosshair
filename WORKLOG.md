@@ -4,6 +4,23 @@
 
 ---
 
+## [2026-08-27] v1.0.3：设置窗口崩溃的真凶——微软雅黑与 ab_glyph 不兼容，内置字体子集根治
+
+总目标：用户报告 UI 起不来（v1.0.1 秒退、v1.0.2 “设置窗口内部错误已捕获”）。日志定位：`epaint fonts.rs:210 PANIC: Error parsing "msyh" TTF/OTF font file: InvalidFont`。同时交付「关闭=隐藏、托盘可重开设置」的 UI 常驻能力。
+
+状态：✅ 完成（CI success；v1.0.3 release 已发，3 资产）
+
+干到哪了：
+- **根因锁定**：运行时装字体（msyh.ttc 提取）送给 egui `set_fonts` 时 epaint 内部 panic。CI 的 `real_system_fonts_parse` 在 windows runner 同样复现 = 非用户机器特例，是 **微软雅黑与 ab_glyph 0.2.11 的解析兼容问题**（社区已知坑）。
+- **根治方案**：fonttools 子集化成 **内置字体** `assets/fonts/ACAJACJK-Regular.otf`（Noto Sans SC → GB2312 全 6763 汉字 + 标点 + ASCII，1.57MB）→ `include_bytes!` 内嵌；加载前 ab_glyph 实测验证（同版本 0.2.11 加 Cargo 依赖）；系统字体降级为后备并逐候选验证。
+- **UI 常驻能力**（用户“找不到 UI 开关”）：点窗口 X = `CancelClose` + `Visible(false)` 隐藏到托盘（不是关闭）；托盘菜单「打开设置」=`show_settings_window()`（Visible(true)+Focus）；托盘「退出」= `QUIT_REQUESTED` + Close。
+- 验证证据：commit 095f53d → CI success（`embedded_font_parses` 通过，42+ 单测）；v1.0.3 release 3 资产（exe ~9.4MB）。
+- 本机生成物：`/tmp/fontenv`（venv+fonttools）+ `/tmp/NotoSansCJKsc-Regular.otf`（16MB 源）+ `/tmp/cjk_chars.txt`（7551 字符）+ subsets 脚本。
+
+下一步：用户下载 v1.0.3 实测。预期：设置窗口正常出现（内置字体），关闭窗口=隐藏，托盘可随时重新打开设置。
+
+---
+
 ## [2026-08-27] v1.0.2：秒退修复（单实例残留提示 + UI 失败常驻）
 
 总目标：用户报告 v1.0.1“打开秒退”。根治两处静默退出路径，任何情况下程序都能自解释。
