@@ -120,7 +120,7 @@ fn load_icon(path: &str) -> Option<HICON> {
     let hinst = hinstance();
     if let Ok(h) = unsafe {
         LoadImageW(
-            Some(hinst),
+            hinst,
             windows::core::PCWSTR(1 as *const u16),
             IMAGE_ICON,
             0,
