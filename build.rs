@@ -9,7 +9,7 @@ fn main() {
 
     // ---- 旧版图标沿用（品牌替换时直接换 assets 下文件即可）----
     let mut res = winres::WindowsResource::new();
-    res.set_icon("FAV/app.ico");
+    res.set_icon("assets/icons/ACAJA.ico");
 
     // ---- 版本信息 ----
     let version = env!("CARGO_PKG_VERSION");

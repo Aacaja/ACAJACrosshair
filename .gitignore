@@ -36,4 +36,4 @@ target/
 dist/
 
 # Logs
-*.log
+*.log*.lnk
