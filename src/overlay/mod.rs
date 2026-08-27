@@ -527,6 +527,11 @@ fn slot_color(colors: &QuadColors, main: (f32, f32, f32), slot: u8) -> (f32, f32
     }
 }
 
+/// 供 UI 预览复用的取色（与屏幕渲染严格一致）
+pub(crate) fn slot_color_pub(colors: &QuadColors, main: (f32, f32, f32), slot: u8) -> (f32, f32, f32) {
+    slot_color(colors, main, slot)
+}
+
 /// 解析 "#RRGGBB" → (r, g, b) 0.0-1.0；失败返回红色
 pub fn parse_hex(s: &str) -> (f32, f32, f32) {
     let s = s.trim_start_matches('#');

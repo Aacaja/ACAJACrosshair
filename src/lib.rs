@@ -12,7 +12,11 @@
 
 pub mod config;
 pub mod i18n;
+pub mod input;
 pub mod overlay;
+pub mod state;
+pub mod system;
+pub mod ui;
 
 /// 品牌名（英文）
 pub const APP_NAME: &str = "ACAJA";

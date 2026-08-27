@@ -4,7 +4,7 @@
 //! 颜色槽位：`SLOT_MAIN` 单色；四象限形状使用 TOP/BOTTOM/LEFT/RIGHT 分色
 //! （对齐 Crosshair X 的多色准星）。
 
-use crate::config::Shape;
+use crate::config::{Preset, Shape};
 
 /// 颜色槽位
 pub const SLOT_MAIN: u8 = 0;
@@ -60,6 +60,18 @@ impl Default for ShapeParams {
 }
 
 impl ShapeParams {
+    /// 从预设构建当前渲染参数
+    pub fn from_preset(p: &Preset, expand: f32) -> Self {
+        ShapeParams {
+            size: p.size,
+            thickness: p.thickness,
+            gap: p.hollow.gap,
+            dot: p.hollow.center_dot_size,
+            expand,
+            outline: if p.outline.enabled { p.outline.thickness } else { 0.0 },
+        }
+    }
+
     /// 臂长（十字/空心十字）：半臂 = size，扩散时加长
     fn arm(self) -> f32 {
         self.size
