@@ -242,13 +242,14 @@ fn msg_thread_main(
     info!("消息线程启动");
 
     let hwnd = create_message_window();
+    let initial_preset = Arc::new(store.lock().expect("store lock").get_active().clone());
     let mut state = MainState {
         store,
         overlay: overlay.clone(),
         hwnd,
         tray: None,
         app: AppState { visible: true, ..Default::default() },
-        preset: Arc::new(store.lock().expect("store lock").get_active().clone()),
+        preset: initial_preset,
         fg_exe: String::new(),
     };
 
@@ -401,7 +402,7 @@ fn msg_thread_main(
         t.remove();
     }
     info!("消息线程退出");
-    let _ = PostQuitMessage(0);
+    unsafe { PostQuitMessage(0) };
 }
 
 // ===========================================================================
