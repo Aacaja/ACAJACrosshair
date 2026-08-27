@@ -3,6 +3,9 @@
 //! S0 骨架：验证编译 / 打包 / 日志 / 单实例链路，
 //! 后续步骤在此逐步替换为 overlay / input / system / ui 各模块。
 
+// 发布版去掉控制台窗口（GUI 子系统）；debug 构建保留控制台便于调试
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::fs::OpenOptions;
 
 use log::{info, warn};
