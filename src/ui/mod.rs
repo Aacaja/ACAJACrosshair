@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use egui::{Align, Color32, ComboBox, Context, RichText, TextEdit, Ui, Visuals};
-use log::info;
+use log::{info, warn};
 
 use crate::config::{
     AdsButton, AdsMode, Hotkey, PosVal, Preset, PresetStore, RightClickMode, Shape,
