@@ -6,8 +6,7 @@
 //! XInput 不在 windows-rs 中，手动链接：
 //! `XInputGetState(dwUserIndex: u32, pState: *mut XINPUT_STATE) -> u32`（ERROR_SUCCESS=0，ERROR_DEVICE_NOT_CONNECTED=1167）
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use log::{info, warn};
