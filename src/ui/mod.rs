@@ -39,6 +39,7 @@ pub static UI_OPEN: std::sync::atomic::AtomicBool =
 pub fn show_settings_window() -> bool {
     if UI_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
         if let Some(ctx) = UI_CTX.get() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         true
@@ -271,6 +272,17 @@ impl AcajaApp {
             });
         });
         ui.label(RichText::new(t(self.lang, "subtitle")).size(11.0).color(ui.visuals().weak_text_color()));
+        ui.horizontal(|ui| {
+            if ui.button(t(self.lang, "tray_minimize")).clicked() {
+                // 隐藏窗口后台运行；托盘可重开设置 / 退出
+                self.overlay.update(Arc::new(self.preset.clone()), crate::state::resolve_position(&self.preset), self.visible);
+                let _ = self.store.lock().unwrap().save_preset(&self.active_name.clone(), &self.preset);
+                if let Some(ctx) = UI_CTX.get() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+            ui.label(RichText::new(t(self.lang, "close_quits")).size(10.5).weak());
+        });
         ui.add_space(6.0);
 
         // 语言/主题变更持久化
@@ -862,9 +874,21 @@ impl eframe::App for AcajaApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // 窗口关闭：释放 UI 标记（主线程据此决定后续周期；UI 资源随 eframe 一并释放）
+        // 窗口关闭：释放 UI 标记（UI 资源随 eframe 一并释放）
         UI_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
-        // 至少保存应用级状态（语言/主题/上次预设）
-        let _ = self.store.lock().unwrap().save_app();
+        // v1.0.7：退出前自动保存当前准星设置 → 下次打开沿用（不需要手动点保存）
+        let (name, preset) = (self.active_name.clone(), self.preset.clone());
+        let result = {
+            let mut store = self.store.lock().unwrap();
+            let res = store.save_preset(&name, &preset);
+            if res.is_ok() {
+                let _ = store.save_app();
+            }
+            res
+        };
+        match result {
+            Ok(()) => info!("退出前已自动保存预设 {name}"),
+            Err(e) => warn!("退出前自动保存失败: {e}"),
+        }
     }
 }

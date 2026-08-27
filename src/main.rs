@@ -250,7 +250,6 @@ fn msg_thread_main(
     overlay: OverlayHandle,
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
-    reopen: Arc<AtomicBool>,
     shared: Arc<RwLock<SharedPreset>>,
 ) {
     info!("消息线程启动");
@@ -356,10 +355,8 @@ fn msg_thread_main(
                             match cmd {
                                 Some(CMD_TOGGLE) => state.toggle_visible(),
                                 Some(CMD_SETTINGS) => {
-                                    if !acaja::ui::show_settings_window() {
-                                        info!("托盘：重新拉起设置窗口");
-                                        reopen.store(true, Ordering::SeqCst);
-                                    }
+                                    // UI 隐藏（后台运行）时恢复显示；UI 已退出则无窗口可开
+                                    let _ = acaja::ui::show_settings_window();
                                 }
                                 Some(CMD_QUIT) => {
                                     info!("托盘退出");
@@ -533,7 +530,6 @@ fn main() {
     // ---- 消息线程（Win32 事件） ----
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false)); // UI 不可用时的全局退出信号（托盘触发）
-    let reopen = Arc::new(AtomicBool::new(false));
     let msg_thread = std::thread::Builder::new()
         .name("acaja-msg".into())
         .spawn({
@@ -541,54 +537,36 @@ fn main() {
             let overlay = overlay.clone();
             let stop = stop.clone();
             let quit = quit.clone();
-            let reopen = reopen.clone();
             let shared = shared.clone();
-            move || msg_thread_main(store, overlay, stop, quit, reopen, shared)
+            move || msg_thread_main(store, overlay, stop, quit, shared)
         })
         .expect("spawn msg thread");
 
-    // ---- 主线程 = egui 设置窗口（Windows 上必须主线程创建窗口） ----
-    // 内存/CPU 优化（v1.0.5）：窗口关闭 = 真正关闭并释放全部 egui/GL 资源；
-    // 托盘「打开设置」时按需重新创建。日常常驻仅保留 D2D 覆盖层 + 消息线程。
+    // ---- 主线程 = egui 设置窗口 ----
+    // v1.0.7：点 X = 保存设置 + 彻底退出；「后台运行」按钮负责隐藏常驻（程序不退出）。
     info!("启动设置窗口……");
-    'ui_loop: loop {
-        let ui_overlay = overlay.clone();
-        let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            acaja::ui::run(store.clone(), ui_overlay, shared.clone(), "ACAJA")
-        }));
+    let ui_overlay = overlay.clone();
+    let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        acaja::ui::run(store.clone(), ui_overlay, shared.clone(), "ACAJA")
+    }));
 
-        match ui_result {
-            Ok(Ok(())) => info!("设置窗口已关闭（资源已释放）"),
-            Ok(Err(e)) => {
-                let text = format!(
-                    "设置窗口启动失败（准星与托盘继续运行）。\n\n错误：{e}\n\n详情见 %APPDATA%/ACAJACrosshair/acaja.log",
-                );
-                warn!("{text}");
-                message_box(&"ACAJA 提示".to_string(), &text);
-            }
-            Err(_) => {
-                let text = "设置窗口发生内部错误（已捕获）。\n\n准星与托盘继续运行。\n详情见 %APPDATA%/ACAJACrosshair/acaja.log";
-                warn!("{text}");
-                message_box(&"ACAJA 提示".to_string(), &text);
-            }
+    match ui_result {
+        Ok(Ok(())) => info!("设置窗口已关闭，程序退出"),
+        Ok(Err(e)) => {
+            let text = format!(
+                "设置窗口启动失败。\n\n错误：{e}\n\n详情见 %APPDATA%/ACAJACrosshair/acaja.log",
+            );
+            warn!("{text}");
+            message_box(&"ACAJA 提示".to_string(), &text);
         }
-
-        // 窗口已关闭/失败：挂起等待托盘「打开设置」(reopen) 或「退出」(quit)
-        info!("设置窗口生命周期结束，等待托盘指令");
-        loop {
-            std::thread::sleep(Duration::from_millis(100));
-            if quit.load(Ordering::SeqCst) {
-                break 'ui_loop;
-            }
-            if reopen.load(Ordering::SeqCst) {
-                reopen.store(false, Ordering::SeqCst);
-                info!("重新创建设置窗口");
-                break;
-            }
+        Err(_) => {
+            let text = "设置窗口发生内部错误（已捕获）。\n详情见 %APPDATA%/ACAJACrosshair/acaja.log";
+            warn!("{text}");
+            message_box(&"ACAJA 提示".to_string(), &text);
         }
     }
 
-    // ---- 收尾 ----
+    // ---- 收尾：退出（自动保存已在 UI on_exit 完成） ----
     stop.store(true, Ordering::SeqCst);
     let _ = msg_thread.join();
     overlay.close();
