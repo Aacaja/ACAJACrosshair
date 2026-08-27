@@ -1,14 +1,15 @@
 //! ACAJA 入口：日志 → 单实例 → 配置迁移 → 全部子系统装配。
 //!
-//! 线程模型：
-//! - 主线程：Win32 消息泵（热键 WM_HOTKEY / Raw Input WM_INPUT / 托盘回调）+ 事件分发
+//! 线程模型（v1.0.1 重构：egui 必须在主线程创建窗口）：
+//! - 主线程：egui 设置窗口（eframe/winit，OpenGL 上下文创建对线程有要求）
+//! - 消息线程：Win32 消息泵（热键 WM_HOTKEY / Raw Input WM_INPUT / 托盘回调 / WinEvent 前台检测）
 //! - 渲染线程：overlay（D2D）
 //! - 手柄线程：XInput 轮询
-//! - UI 线程：egui 设置窗口（关闭即退出程序）
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW,
     PostQuitMessage, RegisterClassW, TranslateMessage, WNDCLASSW, WNDCLASS_STYLES,
-    MSG, PM_REMOVE, WM_CONTEXTMENU, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_QUIT, WS_POPUP,
+    MSG, PM_REMOVE, WM_CONTEXTMENU, WM_HOTKEY, WM_QUIT, WS_POPUP,
     WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 use windows::core::{PCWSTR, w};
@@ -40,8 +41,11 @@ use acaja::{APP_NAME, VERSION};
 const SINGLE_INSTANCE_MUTEX: &str = "Local\\ACAJACrosshair_SingleInstance";
 const MAIN_CLASS: PCWSTR = w!("ACAJAMainWindow");
 
+/// egui Context 全局句柄（托盘退出时经它关闭设置窗口）
+use acaja::ui::UI_CTX;
+
 // ===========================================================================
-// 主状态
+// 主状态（消息线程持有）
 // ===========================================================================
 
 struct MainState {
@@ -52,23 +56,30 @@ struct MainState {
     app: AppState,
     /// 当前生效预设
     preset: Arc<Preset>,
-    /// 当前前台 exe（大写）
+    /// 当前前台 exe（大写，用于去重）
     fg_exe: String,
 }
 
 impl MainState {
-    /// 计算准星位置（显示器/居中/自定义坐标）
     fn position_for_preset(&self) -> (i32, i32) {
         let p = &self.preset;
         match (p.position.x, p.position.y) {
             (acaja::config::PosVal::Px(x), acaja::config::PosVal::Px(y)) => (x as i32, y as i32),
-            (acaja::config::PosVal::Px(x), _) => (x as i32, monitor::primary().map(|m| m.work_center().1).unwrap_or_else(|| acaja::overlay::primary_screen_center().1)),
-            (_, acaja::config::PosVal::Px(y)) => (monitor::primary().map(|m| m.work_center().0).unwrap_or_else(|| acaja::overlay::primary_screen_center().0), y as i32),
-            _ => {
-                monitor::by_index(p.position.monitor)
-                    .map(|m| m.work_center())
-                    .unwrap_or_else(acaja::overlay::primary_screen_center)
-            }
+            (acaja::config::PosVal::Px(x), _) => (
+                x as i32,
+                monitor::primary()
+                    .map(|m| m.work_center().1)
+                    .unwrap_or_else(|| acaja::overlay::primary_screen_center().1),
+            ),
+            (_, acaja::config::PosVal::Px(y)) => (
+                monitor::primary()
+                    .map(|m| m.work_center().0)
+                    .unwrap_or_else(|| acaja::overlay::primary_screen_center().0),
+                y as i32,
+            ),
+            _ => monitor::by_index(p.position.monitor)
+                .map(|m| m.work_center())
+                .unwrap_or_else(acaja::overlay::primary_screen_center),
         }
     }
 
@@ -77,7 +88,6 @@ impl MainState {
         self.overlay.update(self.preset.clone(), pos, self.app.visible);
     }
 
-    /// 重新加载当前预设（激活/切换后调用），并重注册热键
     fn reload_preset(&mut self) {
         let preset = { self.store.lock().unwrap().get_active().clone() };
         self.preset = Arc::new(preset);
@@ -118,7 +128,6 @@ impl MainState {
         }
     }
 
-    /// 开火 → 动态扩散一次性推给渲染层（overlay 内部自动衰减）
     fn fire_started(&mut self, expand: f32) {
         if self.app.visible && expand > 0.0 {
             self.overlay.update_with_expand(
@@ -130,7 +139,6 @@ impl MainState {
         }
     }
 
-    /// 右键切换（点击/按住显示/按住隐藏）
     fn on_right_button(&mut self, down: bool) {
         if !self.preset.right_click_toggle {
             return;
@@ -153,7 +161,6 @@ impl MainState {
         }
     }
 
-    /// 手柄事件
     fn on_gamepad(&mut self, ev: GameEvent) {
         let expand = self.preset.dynamic.fire_expand_px;
         match ev {
@@ -224,91 +231,24 @@ fn create_message_window() -> HWND {
 }
 
 // ===========================================================================
-// UI 线程
+// 消息线程（托盘/热键/前台检测/RawInput/手柄 全部在此）
 // ===========================================================================
 
-fn spawn_ui(store: Arc<Mutex<PresetStore>>, overlay: OverlayHandle, done_tx: Sender<()>) {
-    std::thread::Builder::new()
-        .name("acaja-ui".into())
-        .spawn(move || {
-            match acaja::ui::run(store, overlay, "ACAJA") {
-                Ok(()) => info!("设置窗口已关闭"),
-                Err(e) => warn!("设置窗口异常退出: {e}"),
-            }
-            let _ = done_tx.send(());
-        })
-        .expect("spawn ui thread");
-}
+fn msg_thread_main(
+    store: Arc<Mutex<PresetStore>>,
+    overlay: OverlayHandle,
+    stop: Arc<AtomicBool>,
+) {
+    info!("消息线程启动");
 
-// ===========================================================================
-// 入口
-// ===========================================================================
-
-fn init_logging() -> Option<PathBuf> {
-    let dir = acaja::appdata_dir().ok()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    let log_path = dir.join("acaja.log");
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok()?;
-    simplelog::WriteLogger::init(
-        simplelog::LevelFilter::Info,
-        simplelog::Config::default(),
-        file,
-    )
-    .ok()?;
-    info!("日志文件：{}", log_path.display());
-    Some(log_path)
-}
-
-fn main() {
-    init_logging();
-    info!("{} v{} 启动", APP_NAME, VERSION);
-
-    // ---- 单实例 ----
-    let mutex: HANDLE =
-        unsafe { CreateMutexW(None, false, w!("Local\\ACAJACrosshair_SingleInstance")) }
-            .unwrap_or_default();
-    let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-    if already_running {
-        warn!("检测到已有实例在运行，本实例退出");
-        return;
-    }
-    std::mem::forget(mutex);
-
-    // ---- 配置迁移 + 仓库 ----
-    let appdata = match acaja::appdata_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("无法获取 APPDATA: {e}");
-            return;
-        }
-    };
-    let legacy_dir = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default().join("CrosshairApp");
-    match migrate_legacy(&legacy_dir, &appdata) {
-        Ok(report) if report.presets > 0 => info!("旧版配置迁移完成：{} 个预设", report.presets),
-        Ok(_) => {}
-        Err(e) => warn!("旧版配置迁移失败: {e}"),
-    }
-    let store = match PresetStore::open(&appdata) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("配置仓库打开失败: {e}");
-            return;
-        }
-    };
-    let store = Arc::new(Mutex::new(store));
-    info!("当前预设：{}", store.lock().unwrap().active_name());
-
-    // ---- 覆盖层 ----
-    let (overlay, overlay_thread) = acaja::overlay::start();
-
-    // ---- 主状态 ----
+    let hwnd = create_message_window();
     let mut state = MainState {
-        store: store.clone(),
+        store,
         overlay: overlay.clone(),
-        hwnd: create_message_window(),
+        hwnd,
         tray: None,
         app: AppState { visible: true, ..Default::default() },
-        preset: Arc::new(store.lock().unwrap().get_active().clone()),
+        preset: Arc::new(store.lock().expect("store lock").get_active().clone()),
         fg_exe: String::new(),
     };
 
@@ -345,31 +285,26 @@ fn main() {
     let _gamepad_watcher = start_gamepad(state.preset.gamepad.trigger_threshold);
     let gamepad_rx = _gamepad_watcher.events.clone();
 
-    // ---- UI 线程 ----
-    let (done_tx, done_rx): (Sender<()>, Receiver<()>) = unbounded();
-    spawn_ui(store.clone(), overlay.clone(), done_tx);
-
     // 初始显示
     state.full_update();
+    info!("消息线程就绪，准星已显示");
 
-    // =======================================================================
-    // 主消息泵
-    // =======================================================================
-    info!("主消息泵启动");
-    'pump: loop {
-        // UI 已关闭 → 主循环退出（UI 的退出按钮直接 exit(0)，此处兜底窗口关闭路径）
-        if let Ok(()) = done_rx.try_recv() {
-            info!("UI 已关闭，主循环退出");
-            break 'pump;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            break;
         }
 
-        // 消息泵（非阻塞，事件轮询统一走下方 try_recv 节拍）
+        // ---- 消息泵（非阻塞 + 事件轮询节拍） ----
         unsafe {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
-                    info!("收到 WM_QUIT，主循环退出");
-                    break 'pump;
+                    info!("收到 WM_QUIT");
+                    // 关闭设置窗口以结束进程
+                    if let Some(ctx) = UI_CTX.get() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    break;
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
@@ -396,10 +331,16 @@ fn main() {
                                 .and_then(|t| t.popup_menu(pt.x, pt.y, state.hwnd));
                             match cmd {
                                 Some(CMD_TOGGLE) => state.toggle_visible(),
-                                Some(CMD_SETTINGS) => {}
+                                Some(CMD_SETTINGS) => {
+                                    // 打开设置窗口（主线程 UI 已关闭时再打开；v1.1 实现）
+                                    info!("托盘「打开设置」（v1.1 实现重新拉起窗口）");
+                                }
                                 Some(CMD_QUIT) => {
                                     info!("托盘退出");
-                                    let _ = PostQuitMessage(0);
+                                    if let Some(ctx) = UI_CTX.get() {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+                                    break;
                                 }
                                 _ => {}
                             }
@@ -453,19 +394,115 @@ fn main() {
     }
 
     // ---- 清理 ----
-    if let Some(mut t) = state.tray.take() {
-        t.remove();
-    }
     if let Some(h) = fg_hook {
         acaja::system::foreground::stop_fg_watcher(h);
     }
+    if let Some(mut t) = state.tray.take() {
+        t.remove();
+    }
+    info!("消息线程退出");
+    let _ = PostQuitMessage(0);
+}
+
+// ===========================================================================
+// 入口
+// ===========================================================================
+
+fn init_logging() -> Option<PathBuf> {
+    let dir = acaja::appdata_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let log_path = dir.join("acaja.log");
+    let file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok()?;
+    simplelog::WriteLogger::init(
+        simplelog::LevelFilter::Info,
+        simplelog::Config::default(),
+        file,
+    )
+    .ok()?;
+    info!("日志文件：{}", log_path.display());
+    Some(log_path)
+}
+
+fn main() {
+    init_logging();
+
+    // ---- 全局 panic 钩子：GUI 无控制台，panic 必须落日志 ----
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {info}");
+        log::error!("{msg}");
+        eprintln!("{msg}");
+    }));
+
+    info!("{} v{} 启动", APP_NAME, VERSION);
+
+    // ---- 单实例 ----
+    let mutex: HANDLE =
+        unsafe { CreateMutexW(None, false, w!("Local\\ACAJACrosshair_SingleInstance")) }
+            .unwrap_or_default();
+    let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    if already_running {
+        warn!("检测到已有实例在运行，本实例退出");
+        return;
+    }
+    std::mem::forget(mutex);
+
+    // ---- 配置迁移 + 仓库 ----
+    let appdata = match acaja::appdata_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("无法获取 APPDATA: {e}");
+            return;
+        }
+    };
+    let legacy_dir = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join("CrosshairApp");
+    match migrate_legacy(&legacy_dir, &appdata) {
+        Ok(report) if report.presets > 0 => info!("旧版配置迁移完成：{} 个预设", report.presets),
+        Ok(_) => {}
+        Err(e) => warn!("旧版配置迁移失败: {e}"),
+    }
+    let store = match PresetStore::open(&appdata) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("配置仓库打开失败: {e}");
+            return;
+        }
+    };
+    let store = Arc::new(Mutex::new(store));
+    info!("当前预设：{}", store.lock().unwrap().active_name());
+
+    // ---- 覆盖层 ----
+    let (overlay, overlay_thread) = acaja::overlay::start();
+
+    // ---- 消息线程（Win32 事件） ----
+    let stop = Arc::new(AtomicBool::new(false));
+    let msg_thread = std::thread::Builder::new()
+        .name("acaja-msg".into())
+        .spawn({
+            let store = store.clone();
+            let overlay = overlay.clone();
+            let stop = stop.clone();
+            move || msg_thread_main(store, overlay, stop)
+        })
+        .expect("spawn msg thread");
+
+    // ---- 主线程 = egui 设置窗口（Windows 上必须主线程创建窗口） ----
+    info!("启动设置窗口……");
+    let ui_result = acaja::ui::run(store, overlay, "ACAJA");
+    match ui_result {
+        Ok(()) => info!("设置窗口已关闭"),
+        Err(e) => {
+            // 窗口创建失败时不退出：准星 + 托盘仍可用
+            warn!("设置窗口创建失败（准星与托盘继续运行）: {e}");
+        }
+    }
+
+    // ---- 收尾 ----
+    stop.store(true, Ordering::SeqCst);
+    let _ = msg_thread.join();
     overlay.close();
     let _ = overlay_thread.join();
     info!("ACAJA 已退出");
-}
-
-// 供未来「打开设置」命令使用的占位（避免未使用警告噪音）
-#[allow(dead_code)]
-fn _unused() {
-    let _ = CMD_SETTINGS;
 }

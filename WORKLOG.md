@@ -4,6 +4,23 @@
 
 ---
 
+## [2026-08-27] v1.0.1：修复设置窗口不显示（egui 必须主线程）
+
+总目标：v1.0.0 用户实测发现只有准星、设置窗口不出现。重构线程模型使 egui 窗口在主线程创建，并增加 panic 日志钩子与 UI 失败兜底（准星+托盘继续可用）。
+
+状态：🚧 进行中（提交后待 CI 验证）
+
+干到哪了：
+- 根因判断：egui/eframe(OpenGL glow 后端) 在后台线程创建窗口在 Windows 上会静默失败/panic；GUI 子系统无控制台 → 无任何输出，主线程仍显示准星（与用户现象吻合：只见准星无 UI）。
+- 重构：`src/main.rs` — 主线程直接调 `acaja::ui::run`（egui）；Win32 消息泵（托盘/热键/WinEvent/RawInput/手柄事件）整体迁移到独立「消息线程」`msg_thread_main`，用 `Arc<AtomicBool> stop` 控制退出；托盘/热键/WM_QUIT 通过 `UI_CTX`（ui/mod.rs 的 OnceLock<egui::Context>）发 ViewportCommand::Close 关闭设置窗口。
+- 新增全局 panic hook 写日志（GUI 无 stderr，panic 必须落盘）。
+- UI 窗口创建失败不再拖垮程序：warn 后准星+托盘继续运行。
+- 版本 1.0.0 → 1.0.1；待提交 → CI → tag v1.0.1。
+
+下一步：验证 CI 全绿 → 更新 README 使用教程 → tag v1.0.1 发布 → 用户实测设置界面。
+
+---
+
 ## [2026-08-27] S3+S4+S5：系统层 / 输入层 / 设置界面 / 集成（v1.0.0 完整版，含托盘、热键、手柄 ADS、现代化 egui UI）
 
 总目标：交付功能完整的 ACAJA v1.0.0——覆盖层 + 配置迁移 + 托盘常驻 + 全局热键 + 前台游戏自动切预设 + 手柄 ADS 自动隐藏 + 现代化双语设置界面。CI 全绿、tag v1.0.0 发布 Release、用户可从 Actions/Releases 直接下载使用。

@@ -24,6 +24,9 @@ use crate::ui::strings::{ads_mode_name, shape_name, t};
 const ACCENT: Color32 = Color32::from_rgb(10, 132, 255);
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_millis(1600);
 
+/// egui Context 全局句柄（消息线程在托盘退出时经它关闭设置窗口）
+pub static UI_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
 pub struct AcajaApp {
     store: Arc<Mutex<PresetStore>>,
     overlay: OverlayHandle,
@@ -91,6 +94,9 @@ impl AcajaApp {
         } else {
             info!("未找到中文字体，界面将回退系统字体");
         }
+
+        // 注册全局句柄（托盘退出时关闭窗口）
+        let _ = UI_CTX.set(cc.egui_ctx.clone());
 
         let store_guard = store.lock().unwrap();
         let preset = store_guard.get_active().clone();
