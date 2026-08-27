@@ -323,7 +323,10 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
                         match cmd {
                             Some(CMD_TOGGLE) => state.toggle_visible(),
                             Some(CMD_SETTINGS) => {
-                                let _ = acaja::ui::show_settings_window();
+                                if !acaja::ui::show_settings_window() {
+                                    // UI 已关闭（后台运行模式）→ 要求主线程重建设置窗
+                                    reopen.store(true, Ordering::SeqCst);
+                                }
                             }
                             Some(CMD_QUIT) => {
                                 info!("托盘退出");
@@ -354,6 +357,7 @@ fn msg_thread_main(
     overlay: OverlayHandle,
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
+    reopen: Arc<AtomicBool>,
     shared: Arc<RwLock<SharedPreset>>,
     gamepad_cfg: Arc<RwLock<acaja::input::gamepad::RuntimeGamepadCfg>>,
 ) {
@@ -549,6 +553,7 @@ fn main() {
     // ---- 消息线程（Win32 事件） ----
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false)); // UI 不可用时的全局退出信号（托盘触发）
+    let reopen = Arc::new(AtomicBool::new(false)); // 后台运行模式中要求重建设置窗
     let msg_thread = std::thread::Builder::new()
         .name("acaja-msg".into())
         .spawn({
@@ -558,32 +563,55 @@ fn main() {
             let quit = quit.clone();
             let shared = shared.clone();
             let gamepad_cfg = gamepad_cfg.clone();
-            move || msg_thread_main(store, overlay, stop, quit, shared, gamepad_cfg)
+            let reopen = reopen.clone();
+            move || msg_thread_main(store, overlay, stop, quit, reopen, shared, gamepad_cfg)
         })
         .expect("spawn msg thread");
 
-    // ---- 主线程 = egui 设置窗口 ----
-    // v1.0.7：点 X = 保存设置 + 彻底退出；「后台运行」按钮负责隐藏常驻（程序不退出）。
+    // ---- 主线程 = egui 设置窗口（按需生命周期） ----
+    // v1.0.9：点 X = 退出；「后台运行」= 真正关闭窗口（释放全部资源）后进入常驻，
+    // 托盘「打开设置」重新拉起。
     info!("启动设置窗口……");
-    let ui_overlay = overlay.clone();
-    let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        acaja::ui::run(store.clone(), ui_overlay, shared.clone(), "ACAJA")
-    }));
+    'ui_loop: loop {
+        let ui_overlay = overlay.clone();
+        let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            acaja::ui::run(store.clone(), ui_overlay, shared.clone(), "ACAJA")
+        }));
 
-    match ui_result {
-        Ok(Ok(())) => info!("设置窗口已关闭，程序退出"),
-        Ok(Err(e)) => {
-            let text = format!(
-                "设置窗口启动失败。\n\n错误：{e}\n\n详情见 %APPDATA%/ACAJACrosshair/acaja.log",
-            );
-            warn!("{text}");
-            message_box(&"ACAJA 提示".to_string(), &text);
+        match ui_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let text = format!(
+                    "设置窗口启动失败。\n\n错误：{e}\n\n详情见 %APPDATA%/ACAJACrosshair/acaja.log",
+                );
+                warn!("{text}");
+                message_box(&"ACAJA 提示".to_string(), &text);
+            }
+            Err(_) => {
+                let text =
+                    "设置窗口发生内部错误（已捕获）。\n详情见 %APPDATA%/ACAJACrosshair/acaja.log";
+                warn!("{text}");
+                message_box(&"ACAJA 提示".to_string(), &text);
+            }
         }
-        Err(_) => {
-            let text = "设置窗口发生内部错误（已捕获）。\n详情见 %APPDATA%/ACAJACrosshair/acaja.log";
-            warn!("{text}");
-            message_box(&"ACAJA 提示".to_string(), &text);
+
+        // 后台运行模式：窗口真正关闭，UI 资源全部释放；等待托盘指令
+        if acaja::ui::BACKGROUND_REQUESTED.swap(false, Ordering::SeqCst) {
+            info!("后台运行模式：设置窗已关闭（资源释放），等待托盘指令");
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                if quit.load(Ordering::SeqCst) {
+                    break 'ui_loop;
+                }
+                if reopen.load(Ordering::SeqCst) {
+                    reopen.store(false, Ordering::SeqCst);
+                    info!("托盘要求重建设置窗口");
+                    continue 'ui_loop;
+                }
+            }
         }
+        // X 关闭 → 彻底退出
+        break 'ui_loop;
     }
 
     // ---- 收尾：退出（自动保存已在 UI on_exit 完成） ----

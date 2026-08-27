@@ -31,6 +31,11 @@ pub static UI_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new
 pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 「后台运行」标记：窗口关闭后主线程进入后台常驻（等待托盘重开/退出），
+/// 而不是彻底退出。区别于 X 按钮（彻底退出）。
+pub static BACKGROUND_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 设置窗口当前是否打开（内存优化：窗口关闭后 UI 全部资源被释放）
 pub static UI_OPEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -274,11 +279,13 @@ impl AcajaApp {
         ui.label(RichText::new(t(self.lang, "subtitle")).size(11.0).color(ui.visuals().weak_text_color()));
         ui.horizontal(|ui| {
             if ui.button(t(self.lang, "tray_minimize")).clicked() {
-                // 隐藏窗口后台运行；托盘可重开设置 / 退出
-                self.overlay.update(Arc::new(self.preset.clone()), crate::state::resolve_position(&self.preset), self.visible);
-                let _ = self.store.lock().unwrap().save_preset(&self.active_name.clone(), &self.preset);
+                // v1.0.9：后台运行 = 真正关闭设置窗（释放全部 egui/GL 资源，CPU/内存归零）；
+                // 托盘「打开设置」随时重新拉起。隐藏窗口方案会导致渲染循环空转（CPU 6%）。
+                let (name, preset) = (self.active_name.clone(), self.preset.clone());
+                let _ = self.store.lock().unwrap().save_preset(&name, &preset);
+                BACKGROUND_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
                 if let Some(ctx) = UI_CTX.get() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
             ui.label(RichText::new(t(self.lang, "close_quits")).size(10.5).weak());
