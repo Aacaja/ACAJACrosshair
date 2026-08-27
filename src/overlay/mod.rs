@@ -32,9 +32,9 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U, ID2D1SimplifiedGeometrySink,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, D2D1_DEBUG_LEVEL_NONE, D2D1_ELLIPSE, D2D1_FACTORY_OPTIONS,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    D2D1CreateFactory, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DEBUG_LEVEL_NONE,
+    D2D1_ELLIPSE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory,
     ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
@@ -315,7 +315,7 @@ fn render_frame(canvas: &mut Canvas) -> Result<(), windows::core::Error> {
         BlendOp: 0, // AC_SRC_OVER
         BlendFlags: 0,
         SourceConstantAlpha: 255,
-        AlphaFormat: AC_SRC_ALPHA,
+        AlphaFormat: AC_SRC_ALPHA as u8,
     };
     unsafe {
         let size = SIZE { cx: w, cy: h };
@@ -485,7 +485,13 @@ fn draw_custom_image(canvas: &mut Canvas, rt: &ID2D1RenderTarget) -> Result<(), 
             bottom: cy + img.h as f32 / 2.0,
         };
         unsafe {
-            let _ = rt.DrawBitmap(&img.bitmap, Some(&dst), preset.opacity, D2D1_INTERPOLATION_MODE_LINEAR, None);
+            let _ = rt.DrawBitmap(
+                &img.bitmap,
+                Some(&dst),
+                preset.opacity,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
         }
     }
     Ok(())
@@ -602,7 +608,7 @@ fn create_canvas() -> Result<Canvas, windows::core::Error> {
         let class_name = WINDOW_CLASS;
         let wc = WNDCLASSW {
             style: WNDCLASS_STYLES(0),
-            lpfnWndProc: overlay_wnd_proc,
+            lpfnWndProc: Some(overlay_wnd_proc),
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: HINSTANCE(GetModuleHandleW(PCWSTR::null())?.0),
