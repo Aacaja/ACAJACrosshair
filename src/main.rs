@@ -342,7 +342,8 @@ fn main() {
     }
 
     // ---- 手柄 ----
-    let gamepad_rx = start_gamepad(state.preset.gamepad.trigger_threshold).events;
+    let _gamepad_watcher = start_gamepad(state.preset.gamepad.trigger_threshold);
+    let gamepad_rx = _gamepad_watcher.events.clone();
 
     // ---- UI 线程 ----
     let (done_tx, done_rx): (Sender<()>, Receiver<()>) = unbounded();
