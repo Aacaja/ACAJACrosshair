@@ -27,15 +27,23 @@ const STATUS_TTL: std::time::Duration = std::time::Duration::from_millis(1600);
 /// egui Context 全局句柄（消息线程在托盘退出时经它关闭设置窗口）
 pub static UI_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
 
-/// 主动退出标记：托盘「退出」时为 true；用户点窗口 X 不会置位（仅隐藏）
+/// 主动退出标记：托盘「退出」时为 true；用户点窗口 X 不会置位
 pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 重新打开设置窗口（隐藏状态下恢复显示并聚焦）
-pub fn show_settings_window() {
-    if let Some(ctx) = UI_CTX.get() {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+/// 设置窗口当前是否打开（内存优化：窗口关闭后 UI 全部资源被释放）
+pub static UI_OPEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 请求打开设置窗口。返回 true = 窗口已在显示（已聚焦）；false = 由主线程重新创建。
+pub fn show_settings_window() -> bool {
+    if UI_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(ctx) = UI_CTX.get() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        true
+    } else {
+        false
     }
 }
 
@@ -95,6 +103,9 @@ impl AcajaApp {
         overlay: OverlayHandle,
         shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
     ) -> Self {
+        // 标记窗口打开（内存/CPU 决策依据）
+        UI_OPEN.store(true, std::sync::atomic::Ordering::SeqCst);
+
         // ---- 中文字体 ----
         if let Some(font_bytes) = fonts::load_cjk_font() {
             let mut fonts = egui::FontDefinitions::default();
@@ -796,14 +807,6 @@ impl AcajaApp {
 
 impl eframe::App for AcajaApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // ---- 关闭拦截：点 X = 隐藏到托盘（程序常驻），托盘「退出」才置 QUIT_REQUESTED ----
-        if ctx.input(|i| i.viewport().close_requested())
-            && !QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        }
-
         // ---- 主题 ----
         let dark = match self.theme.as_str() {
             "light" => false,
@@ -853,6 +856,8 @@ impl eframe::App for AcajaApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // 窗口关闭：释放 UI 标记（主线程据此决定后续周期；UI 资源随 eframe 一并释放）
+        UI_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
         // 至少保存应用级状态（语言/主题/上次预设）
         let _ = self.store.lock().unwrap().save_app();
     }

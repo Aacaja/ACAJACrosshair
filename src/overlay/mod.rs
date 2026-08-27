@@ -153,44 +153,35 @@ fn overlay_thread(rx: Receiver<Msg>) {
     };
 
     loop {
-        let slot_timeout = if canvas.animating { ANIM_STEP } else { Duration::from_millis(100) };
-        let tick = after(slot_timeout);
         let mut dirty = false;
 
-        select! {
-            recv(rx) -> msg => {
-                match msg {
-                    Ok(m) => match m {
-                        Msg::Update { preset, pos, visible, expand } => {
-                            canvas.preset = preset;
-                            canvas.pos = pos;
-                            canvas.visible = visible;
-                            canvas.expand = expand;
-                            canvas.animating = expand > 0.01 && canvas.preset.dynamic.fire_expand_px > 0.0;
-                            dirty = true;
-                        }
-                        Msg::Move { pos } => {
-                            canvas.pos = pos;
-                            dirty = true;
-                        }
-                        Msg::Close => {
-                            canvas.cleanup();
-                            info!("overlay 线程退出");
-                            return;
-                        }
-                    },
-                    Err(_) => {}
+        let mut quit = false;
+        if canvas.animating {
+            // 动画期：16ms 节拍驱动衰减
+            let tick = after(ANIM_STEP);
+            select! {
+                recv(rx) -> msg => {
+                    quit = handle_msg(&mut canvas, &mut dirty, msg);
                 }
-            }
-            recv(tick) -> _ => {
-                // 动态扩散衰减
-                if canvas.animating {
+                recv(tick) -> _ => {
                     let rate = 1000.0 / canvas.preset.dynamic.recover_ms.max(1) as f32; // px/s
                     canvas.expand = (canvas.expand - rate * 0.016).max(0.0);
                     canvas.animating = canvas.expand > 0.01;
                     dirty = true;
                 }
             }
+        } else {
+            // 空闲：纯阻塞等消息（≈0 唤醒，最小化 CPU 占用）
+            select! {
+                recv(rx) -> msg => {
+                    quit = handle_msg(&mut canvas, &mut dirty, msg);
+                }
+            }
+        }
+        if quit {
+            canvas.cleanup();
+            info!("overlay 线程退出");
+            return;
         }
 
         pump_messages(canvas.hwnd);
@@ -211,6 +202,29 @@ fn overlay_thread(rx: Receiver<Msg>) {
             }
         }
     }
+}
+
+
+fn handle_msg(canvas: &mut Canvas, dirty: &mut bool, msg: Result<Msg, crossbeam_channel::RecvError>) -> bool {
+    match msg {
+        Ok(m) => match m {
+            Msg::Update { preset, pos, visible, expand } => {
+                canvas.preset = preset;
+                canvas.pos = pos;
+                canvas.visible = visible;
+                canvas.expand = expand;
+                canvas.animating = expand > 0.01 && canvas.preset.dynamic.fire_expand_px > 0.0;
+                *dirty = true;
+            }
+            Msg::Move { pos } => {
+                canvas.pos = pos;
+                *dirty = true;
+            }
+            Msg::Close => return true,
+        },
+        Err(_) => {}
+    }
+    false
 }
 
 fn pump_messages(hwnd: HWND) {

@@ -267,6 +267,7 @@ fn msg_thread_main(
     overlay: OverlayHandle,
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
+    reopen: Arc<AtomicBool>,
     shared: Arc<RwLock<SharedPreset>>,
 ) {
     info!("消息线程启动");
@@ -337,9 +338,10 @@ fn msg_thread_main(
                 if msg.message == WM_QUIT {
                     info!("收到 WM_QUIT");
                     acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
-                    // 关闭设置窗口以结束进程；UI 未开时直接置退出信号
-                    if let Some(ctx) = UI_CTX.get() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    if acaja::ui::UI_OPEN.load(Ordering::SeqCst) {
+                        if let Some(ctx) = UI_CTX.get() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
                     } else {
                         quit.store(true, Ordering::SeqCst);
                     }
@@ -371,14 +373,18 @@ fn msg_thread_main(
                             match cmd {
                                 Some(CMD_TOGGLE) => state.toggle_visible(),
                                 Some(CMD_SETTINGS) => {
-                                    info!("托盘：打开设置");
-                                    acaja::ui::show_settings_window();
+                                    if !acaja::ui::show_settings_window() {
+                                        info!("托盘：重新拉起设置窗口");
+                                        reopen.store(true, Ordering::SeqCst);
+                                    }
                                 }
                                 Some(CMD_QUIT) => {
                                     info!("托盘退出");
                                     acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
-                                    if let Some(ctx) = UI_CTX.get() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    if acaja::ui::UI_OPEN.load(Ordering::SeqCst) {
+                                        if let Some(ctx) = UI_CTX.get() {
+                                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                        }
                                     } else {
                                         quit.store(true, Ordering::SeqCst);
                                     }
@@ -432,8 +438,9 @@ fn msg_thread_main(
             state.on_gamepad(ev);
         }
 
-        // 空闲节拍
-        std::thread::sleep(Duration::from_millis(10));
+        // 空闲节拍：UI 打开时 10ms（界面响应），UI 关闭后 50ms（省电）
+        let tick_ms = if acaja::ui::UI_OPEN.load(Ordering::SeqCst) { 10 } else { 50 };
+        std::thread::sleep(Duration::from_millis(tick_ms));
     }
 
     // ---- 清理 ----
@@ -543,6 +550,7 @@ fn main() {
     // ---- 消息线程（Win32 事件） ----
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false)); // UI 不可用时的全局退出信号（托盘触发）
+    let reopen = Arc::new(AtomicBool::new(false));
     let msg_thread = std::thread::Builder::new()
         .name("acaja-msg".into())
         .spawn({
@@ -550,45 +558,51 @@ fn main() {
             let overlay = overlay.clone();
             let stop = stop.clone();
             let quit = quit.clone();
+            let reopen = reopen.clone();
             let shared = shared.clone();
-            move || msg_thread_main(store, overlay, stop, quit, shared)
+            move || msg_thread_main(store, overlay, stop, quit, reopen, shared)
         })
         .expect("spawn msg thread");
 
     // ---- 主线程 = egui 设置窗口（Windows 上必须主线程创建窗口） ----
+    // 内存/CPU 优化（v1.0.5）：窗口关闭 = 真正关闭并释放全部 egui/GL 资源；
+    // 托盘「打开设置」时按需重新创建。日常常驻仅保留 D2D 覆盖层 + 消息线程。
     info!("启动设置窗口……");
-    let ui_overlay = overlay.clone();
-    let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        acaja::ui::run(store, ui_overlay, shared, "ACAJA")
-    }));
+    'ui_loop: loop {
+        let ui_overlay = overlay.clone();
+        let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            acaja::ui::run(store.clone(), ui_overlay, shared.clone(), "ACAJA")
+        }));
 
-    let ui_ok = match ui_result {
-        Ok(Ok(())) => {
-            info!("设置窗口已关闭");
-            true
+        match ui_result {
+            Ok(Ok(())) => info!("设置窗口已关闭（资源已释放）"),
+            Ok(Err(e)) => {
+                let text = format!(
+                    "设置窗口启动失败（准星与托盘继续运行）。\n\n错误：{e}\n\n详情见 %APPDATA%/ACAJACrosshair/acaja.log",
+                );
+                warn!("{text}");
+                message_box(&"ACAJA 提示".to_string(), &text);
+            }
+            Err(_) => {
+                let text = "设置窗口发生内部错误（已捕获）。\n\n准星与托盘继续运行。\n详情见 %APPDATA%/ACAJACrosshair/acaja.log";
+                warn!("{text}");
+                message_box(&"ACAJA 提示".to_string(), &text);
+            }
         }
-        Ok(Err(e)) => {
-            // 窗口创建失败时不退出：准星 + 托盘继续运行
-            let text = format!("设置窗口启动失败（准星与托盘继续运行）。\n\n错误：{e}\n\n详情见 %APPDATA%/ACAJACrosshair/acaja.log",);
-            warn!("{text}");
-            message_box(&"ACAJA 提示".to_string(), &text);
-            false
-        }
-        Err(_) => {
-            let text = "设置窗口发生内部错误（已捕获）。\n\n准星与托盘继续运行。\n详情见 %APPDATA%/ACAJACrosshair/acaja.log";
-            warn!("{text}");
-            message_box(&"ACAJA 提示".to_string(), &text);
-            false
-        }
-    };
 
-    if !ui_ok {
-        // UI 不可用：常驻模式，等待托盘退出信号（或由消息线程置 quit）
-        info!("无 UI 常驻模式启动（托盘退出结束程序）");
-        while !quit.load(Ordering::SeqCst) {
+        // 窗口已关闭/失败：挂起等待托盘「打开设置」(reopen) 或「退出」(quit)
+        info!("设置窗口生命周期结束，等待托盘指令");
+        loop {
             std::thread::sleep(Duration::from_millis(100));
+            if quit.load(Ordering::SeqCst) {
+                break 'ui_loop;
+            }
+            if reopen.load(Ordering::SeqCst) {
+                reopen.store(false, Ordering::SeqCst);
+                info!("重新创建设置窗口");
+                break;
+            }
         }
-        info!("收到退出信号");
     }
 
     // ---- 收尾 ----
