@@ -16,7 +16,6 @@ use windows::Win32::Foundation::ERROR_SUCCESS;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "ACAJACrosshair";
-
 /// 写入自启项；enabled=false 时删除
 pub fn set_autostart(enabled: bool) -> windows::core::Result<()> {
     let key = open_run_key()?;
@@ -32,7 +31,7 @@ pub fn set_autostart(enabled: bool) -> windows::core::Result<()> {
         let err = unsafe {
             RegSetValueExW(
                 key,
-                windows::core::w!(VALUE_NAME),
+                windows::core::w!("ACAJACrosshair"),
                 0,
                 REG_SZ,
                 Some(&bytes),
@@ -45,7 +44,7 @@ pub fn set_autostart(enabled: bool) -> windows::core::Result<()> {
             Err(windows::core::Error::from(err))
         }
     } else {
-        let err = unsafe { RegDeleteValueW(key, windows::core::w!(VALUE_NAME)) };
+        let err = unsafe { RegDeleteValueW(key, windows::core::w!("ACAJACrosshair")) };
         let _ = unsafe { RegCloseKey(key) };
         // 值不存在也视为成功
         if err == ERROR_SUCCESS {
@@ -61,7 +60,7 @@ fn open_run_key() -> windows::core::Result<HKEY> {
     let err = unsafe {
         RegCreateKeyExW(
             HKEY_CURRENT_USER,
-            windows::core::w!(RUN_KEY),
+            windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
             0,
             None,
             REG_OPTION_NON_VOLATILE,
