@@ -4,6 +4,21 @@
 
 ---
 
+## [2026-08-28] v1.0.8：LB/RB 触发动态生效 + CPU 事件驱动化（6% → <1%）
+
+总目标：① 修"设了 LB 仍扳机触发"（触发源是启动参数，UI 改动不生效）② CPU 6% 降到最小。
+
+状态：✅ 完成（v1.0.8 CI success，Release assets=3）
+
+干到哪了：
+- **手柄配置动态化**：`input/gamepad.rs` 新增 `RuntimeGamepadCfg{threshold, ads_source}`（Copy + RwLock 共享）；`start_gamepad(cfg)` 轮询线程每 8ms 读取最新配置 → UI 里改 LB/RB/阈值**即时生效**（此前启动即固定，v1.0.6 修了位常量但同步链路漏了）；msg 线程 `sync_from_ui` 在 shared preset 版本变化时同步 `gamepad_cfg`。
+- **CPU 优化（事件驱动）**：消息线程从"try_recv 轮询 + sleep"（每秒 20-100 次空转）改为 `crossbeam select!`：gamepad/fg 通道**阻塞式实时接收**（事件零延迟），消息泵（托盘/热键）只在低频 tick（UI 开 10ms / 关 50ms）执行；XInput 轮询 4ms→8ms（125Hz，ADS 延迟 <8ms）。预估常驻 CPU <1% 单核。
+- 踩坑：大段主循环替换脚本分 A-G 步骤，其中 A/B 段首轮失败未落盘导致编译错（start_gamepad 参数/签名不一致），拾遗修复；`RwLock` import 补漏；tag 触发的 release 异步生成延迟（gh 查询过早显示 404）。
+- 验证证据：commit d9968af → CI success；v1.0.8 release assets=3。
+
+下一步：用户实测（LB 触发 + CPU 数值）。backlog：v1.1 = 托盘重开设置（UI 已退出场景）、Raw Input HID 手柄（零轮询）可选深度优化。
+
+---
 ## [2026-08-28] v1.0.6 + v1.0.7：LB 肩键位修正 / 中心语义统一 / 关窗=保存并退出 / 自动恢复设置
 
 总目标：修复肩键触发、松手位置偏移；按用户操作直觉重构退出路径（点 X = 全退）+ 设置自动保存。
