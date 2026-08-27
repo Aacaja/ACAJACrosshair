@@ -35,7 +35,8 @@ pub struct XINPUT_STATE {
     pub Gamepad: XINPUT_GAMEPAD,
 }
 
-#[link(name = "xinput1_4")]
+// SDK 提供 XInput.lib（转发到 xinput1_4.dll），因此链接名必须是 XInput
+#[link(name = "XInput")]
 unsafe extern "system" {
     fn XInputGetState(dwUserIndex: u32, pState: *mut XINPUT_STATE) -> u32;
 }
