@@ -1061,7 +1061,7 @@ mod tests {
         // 构造旧版目录
         let old = temp_dir("legacy_old");
         let new = temp_dir("legacy_new");
-        let legacy_json = r#"{
+        let legacy_json = r##"{
             "shape": "hollow_cross_dot",
             "size": 32,
             "thickness": 2,
@@ -1082,7 +1082,7 @@ mod tests {
             "auto_topmost_on_fullscreen": true,
             "language": "en",
             "opacity_extra": "ignored_unknown_field"
-        }"#;
+        }"##;
         fs::write(old.join("apex.json"), legacy_json).unwrap();
         fs::write(
             old.join("app_state.json"),
