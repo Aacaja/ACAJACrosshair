@@ -82,9 +82,10 @@ impl AdsSource {
     }
 }
 
-// XINPUT_GAMEPAD 肩键位
-const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0004;
-const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0008;
+// XINPUT_GAMEPAD 肩键位（v1.0.6 修正：0x0004/0x0008 是方向键 LEFT/RIGHT！
+// 正确值：LB = 0x0100，RB = 0x0200）
+const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0100;
+const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0200;
 
 /// 启动手柄轮询线程。threshold 0-255（扳机模拟量）；ads_source 决定瞄准触发键。
 pub fn start_gamepad(threshold: u8, ads_source: AdsSource) -> GamepadWatcher {

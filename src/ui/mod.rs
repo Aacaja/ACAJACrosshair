@@ -216,12 +216,7 @@ impl AcajaApp {
     }
 
     fn push_to_overlay(&mut self) {
-        let pos = match (self.preset.position.x, self.preset.position.y) {
-            (PosVal::Px(x), PosVal::Px(y)) => (x as i32, y as i32),
-            (PosVal::Center, PosVal::Center) => crate::overlay::primary_screen_center(),
-            (PosVal::Px(x), _) => (x as i32, crate::overlay::primary_screen_center().1),
-            (_, PosVal::Px(y)) => (crate::overlay::primary_screen_center().0, y as i32),
-        };
+        let pos = crate::state::resolve_position(&self.preset);
         let p = Arc::new(self.preset.clone());
         // 同步到共享仓库：消息线程（手柄/热键/右键/前台）读取同一份数据
         {

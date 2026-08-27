@@ -70,24 +70,7 @@ impl MainState {
 
     fn position_for_preset(&self) -> (i32, i32) {
         let p = self.preset();
-        match (p.position.x, p.position.y) {
-            (acaja::config::PosVal::Px(x), acaja::config::PosVal::Px(y)) => (x as i32, y as i32),
-            (acaja::config::PosVal::Px(x), _) => (
-                x as i32,
-                monitor::primary()
-                    .map(|m| m.work_center().1)
-                    .unwrap_or_else(|| acaja::overlay::primary_screen_center().1),
-            ),
-            (_, acaja::config::PosVal::Px(y)) => (
-                monitor::primary()
-                    .map(|m| m.work_center().0)
-                    .unwrap_or_else(|| acaja::overlay::primary_screen_center().0),
-                y as i32,
-            ),
-            _ => monitor::by_index(p.position.monitor)
-                .map(|m| m.work_center())
-                .unwrap_or_else(acaja::overlay::primary_screen_center),
-        }
+        acaja::state::resolve_position(&p)
     }
 
     fn full_update(&mut self) {

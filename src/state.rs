@@ -64,14 +64,17 @@ pub fn next_preset(current: &str, names: &[String]) -> String {
     names[(pos + 1) % names.len()].clone()
 }
 
-/// 解析预设位置 → 屏幕坐标占位（由 main 结合显示器信息填充分辨率）。
-/// 返回 Option 坐标：Center 返回 None。
-pub fn resolve_position(pos: &crate::config::Position) -> Option<(i32, i32)> {
-    match (pos.x, pos.y) {
-        (crate::config::PosVal::Px(x), crate::config::PosVal::Px(y)) => Some((x as i32, y as i32)),
-        (crate::config::PosVal::Px(x), _) => Some((x as i32, 0)),
-        (_, crate::config::PosVal::Px(y)) => Some((0, y as i32)),
-        _ => None,
+/// 解析预设位置 → 屏幕坐标（v1.0.6：UI 与消息线程统一从这里取位置）。
+/// 中心语义 = 目标显示器「几何中心」（不是工作区中心，避免任务栏导致偏上）。
+pub fn resolve_position(p: &crate::config::Preset) -> (i32, i32) {
+    let center = crate::system::monitor::by_index(p.position.monitor)
+        .map(|m| m.rect_center())
+        .unwrap_or_else(crate::overlay::primary_screen_center);
+    match (p.position.x, p.position.y) {
+        (crate::config::PosVal::Px(x), crate::config::PosVal::Px(y)) => (x as i32, y as i32),
+        (crate::config::PosVal::Px(x), _) => (x as i32, center.1),
+        (_, crate::config::PosVal::Px(y)) => (center.0, y as i32),
+        _ => center,
     }
 }
 
@@ -146,15 +149,18 @@ mod tests {
 
     #[test]
     fn resolve_position_works() {
-        use crate::config::{PosVal, Position};
-        assert_eq!(
-            resolve_position(&Position {
-                x: PosVal::Px(100.0),
-                y: PosVal::Px(200.0),
-                monitor: -1,
-            }),
-            Some((100, 200))
-        );
-        assert_eq!(resolve_position(&Position::default()), None);
+        use crate::config::{PosVal, Position, Preset};
+        let mut p = Preset::default();
+        p.position = Position { x: PosVal::Px(100.0), y: PosVal::Px(200.0), monitor: -1 };
+        assert_eq!(resolve_position(&p), (100, 200));
+        // 单轴 Px + Center
+        p.position = Position { x: PosVal::Px(50.0), y: PosVal::Center, monitor: -1 };
+        let (x, y) = resolve_position(&p);
+        assert_eq!(x, 50);
+        assert!(y > 0);
+        // 全 Center → 必须落在屏幕范围内（CI 有真实显示器）
+        let p2 = Preset::default();
+        let (cx, cy) = resolve_position(&p2);
+        assert!(cx > 0 && cy > 0, "中心解析异常: {cx},{cy}");
     }
 }
