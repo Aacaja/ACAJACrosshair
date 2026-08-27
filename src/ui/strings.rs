@@ -103,7 +103,7 @@ fn zh(key: &str) -> &'static str {
         "rc_click" => "点击切换",
         "rc_hold_show" => "按住显示",
         "rc_hold_hide" => "按住隐藏",
-        _ => key,
+        _ => "",
     }
 }
 
@@ -197,7 +197,7 @@ fn en(key: &str) -> &'static str {
         "rc_click" => "Click to toggle",
         "rc_hold_show" => "Hold to show",
         "rc_hold_hide" => "Hold to hide",
-        _ => key,
+        _ => "",
     }
 }
 

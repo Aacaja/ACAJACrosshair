@@ -14,6 +14,8 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, HDC, HMONITOR,
 };
 
+use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MonitorInfo {
     /// 完整显示区域 (left, top, right, bottom)

@@ -140,7 +140,15 @@ impl AcajaApp {
     }
 
     fn save_current(&mut self) {
-        match self.store.lock().unwrap().save_preset(&self.active_name, &self.preset) {
+        let result = {
+            let mut store = self.store.lock().unwrap();
+            let res = store.save_preset(&self.active_name.clone(), &self.preset);
+            if res.is_ok() {
+                let _ = store.save_app();
+            }
+            res
+        };
+        match result {
             Ok(()) => self.flash(format!("{} {}", t(self.lang, "saved"), self.active_name)),
             Err(e) => self.flash(format!("{}: {e}", t(self.lang, "error"))),
         }
@@ -299,12 +307,12 @@ impl AcajaApp {
         // 颜色编辑（主色 + 可选四象限）
         ui.add_space(4.0);
         if self.preset.multicolor {
-            self.color_row(ui, t(self.lang, "color_top"), &mut self.hex_top, &mut self.preset.colors.top);
-            self.color_row(ui, t(self.lang, "color_bottom"), &mut self.hex_bottom, &mut self.preset.colors.bottom);
-            self.color_row(ui, t(self.lang, "color_left"), &mut self.hex_left, &mut self.preset.colors.left);
-            self.color_row(ui, t(self.lang, "color_right"), &mut self.hex_right, &mut self.preset.colors.right);
+            color_row_ui(ui, t(self.lang, "color_top"), &mut self.hex_top, &mut self.preset.colors.top, &mut self.dirty);
+            color_row_ui(ui, t(self.lang, "color_bottom"), &mut self.hex_bottom, &mut self.preset.colors.bottom, &mut self.dirty);
+            color_row_ui(ui, t(self.lang, "color_left"), &mut self.hex_left, &mut self.preset.colors.left, &mut self.dirty);
+            color_row_ui(ui, t(self.lang, "color_right"), &mut self.hex_right, &mut self.preset.colors.right, &mut self.dirty);
         } else {
-            self.color_row(ui, t(self.lang, "main_color"), &mut self.hex_main, &mut self.preset.color);
+            color_row_ui(ui, t(self.lang, "main_color"), &mut self.hex_main, &mut self.preset.color, &mut self.dirty);
         }
 
         // 空心参数（仅相关形状显示）
@@ -341,7 +349,7 @@ impl AcajaApp {
                     self.dirty = true;
                 }
             });
-            self.color_row(ui, t(self.lang, "outline_color"), &mut self.hex_outline, &mut self.preset.outline.color);
+            color_row_ui(ui, t(self.lang, "outline_color"), &mut self.hex_outline, &mut self.preset.outline.color, &mut self.dirty);
             ui.horizontal(|ui| {
                 ui.label(t(self.lang, "outline_opacity"));
                 if ui.add(egui::Slider::new(&mut self.preset.outline.opacity, 0.1..=1.0).show_value(true)).changed() {
@@ -351,31 +359,38 @@ impl AcajaApp {
         }
     }
 
-    fn color_row(&mut self, ui: &mut Ui, label: &str, buf: &mut String, target: &mut String) {
-        ui.horizontal(|ui| {
-            ui.label(label);
-            // 色块
-            let (r, g, b) = crate::overlay::parse_hex(target);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 20.0), egui::Sense::hover());
-            ui.painter().rect_filled(
-                rect,
-                4.0,
-                Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8),
-            );
-            let resp = ui.add(
-                TextEdit::singleline(buf)
-                    .hint_text(t(self.lang, "hex_hint"))
-                    .desired_width(110.0),
-            );
-            if resp.changed() {
-                let s = buf.trim().trim_start_matches('#');
-                if s.len() == 6 && u32::from_str_radix(s, 16).is_ok() {
-                    *target = format!("#{}", s.to_uppercase());
-                    self.dirty = true;
-                }
+/// 颜色编辑行：色块 + hex 输入（静态函数避免 self 双重借用）
+fn color_row_ui(
+    ui: &mut Ui,
+    label: &str,
+    buf: &mut String,
+    target: &mut String,
+    dirty: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        // 色块
+        let (r, g, b) = crate::overlay::parse_hex(target);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 20.0), egui::Sense::hover());
+        ui.painter().rect_filled(
+            rect,
+            4.0,
+            Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8),
+        );
+        let resp = ui.add(
+            TextEdit::singleline(buf)
+                .hint_text("#RRGGBB")
+                .desired_width(110.0),
+        );
+        if resp.changed() {
+            let s = buf.trim().trim_start_matches('#');
+            if s.len() == 6 && u32::from_str_radix(s, 16).is_ok() {
+                *target = format!("#{}", s.to_uppercase());
+                *dirty = true;
             }
-        });
-    }
+        }
+    });
+}
 
     fn dynamic_ui(&mut self, ui: &mut Ui) {
         Self::section_title(ui, t(self.lang, "dynamic"));
@@ -479,18 +494,24 @@ impl AcajaApp {
                         RightClickMode::HoldHide => t(self.lang, "rc_hold_hide"),
                     })
                     .show_ui(ui, |ui| {
-                        let set = |m: RightClickMode| {
-                            if ui.selectable_value(&mut self.preset.right_click_mode, m, match m {
-                                RightClickMode::Click => t(self.lang, "rc_click"),
-                                RightClickMode::HoldShow => t(self.lang, "rc_hold_show"),
-                                RightClickMode::HoldHide => t(self.lang, "rc_hold_hide"),
-                            }).changed() {
-                                self.dirty = true;
-                            }
-                        };
-                        set(RightClickMode::Click);
-                        set(RightClickMode::HoldShow);
-                        set(RightClickMode::HoldHide);
+                        if ui
+                            .selectable_value(&mut self.preset.right_click_mode, RightClickMode::Click, t(self.lang, "rc_click"))
+                            .changed()
+                        {
+                            self.dirty = true;
+                        }
+                        if ui
+                            .selectable_value(&mut self.preset.right_click_mode, RightClickMode::HoldShow, t(self.lang, "rc_hold_show"))
+                            .changed()
+                        {
+                            self.dirty = true;
+                        }
+                        if ui
+                            .selectable_value(&mut self.preset.right_click_mode, RightClickMode::HoldHide, t(self.lang, "rc_hold_hide"))
+                            .changed()
+                        {
+                            self.dirty = true;
+                        }
                     });
             });
         }
@@ -518,16 +539,18 @@ impl AcajaApp {
                     AdsButton::RightTrigger => t(self.lang, "ads_right_trigger"),
                 })
                 .show_ui(ui, |ui| {
-                    let set = |b: AdsButton| {
-                        if ui.selectable_value(&mut self.preset.gamepad.ads_button, b, match b {
-                            AdsButton::LeftTrigger => t(self.lang, "ads_left_trigger"),
-                            AdsButton::RightTrigger => t(self.lang, "ads_right_trigger"),
-                        }).changed() {
-                            self.dirty = true;
-                        }
-                    };
-                    set(AdsButton::LeftTrigger);
-                    set(AdsButton::RightTrigger);
+                    if ui
+                        .selectable_value(&mut self.preset.gamepad.ads_button, AdsButton::LeftTrigger, t(self.lang, "ads_left_trigger"))
+                        .changed()
+                    {
+                        self.dirty = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.preset.gamepad.ads_button, AdsButton::RightTrigger, t(self.lang, "ads_right_trigger"))
+                        .changed()
+                    {
+                        self.dirty = true;
+                    }
                 });
         });
         ui.horizontal(|ui| {
@@ -571,9 +594,20 @@ impl AcajaApp {
             if ui.button(t(self.lang, "delete")).clicked() {
                 if self.active_name == "default" {
                     self.flash(t(self.lang, "cannot_delete_default").to_string());
-                } else if self.store.lock().unwrap().delete_preset(&self.active_name).unwrap_or(false) {
-                    self.flash(format!("{} {}", t(self.lang, "deleted"), self.active_name));
-                    self.apply_preset("default");
+                } else {
+                    let (ok, name) = {
+                        let mut store = self.store.lock().unwrap();
+                        let name = self.active_name.clone();
+                        let ok = store.delete_preset(&name).unwrap_or(false);
+                        if ok {
+                            let _ = store.save_app();
+                        }
+                        (ok, name)
+                    };
+                    if ok {
+                        self.flash(format!("{} {}", t(self.lang, "deleted"), name));
+                        self.apply_preset("default");
+                    }
                 }
             }
         });
@@ -583,12 +617,17 @@ impl AcajaApp {
             if ui.button(t(self.lang, "create")).clicked() {
                 let name = self.new_preset_name.trim().to_string();
                 if !name.is_empty() {
-                    let mut store = self.store.lock().unwrap();
-                    let name = name.clone();
-                    match store.save_preset(&name, &self.preset) {
+                    let result = {
+                        let mut store = self.store.lock().unwrap();
+                        let res = store.save_preset(&name, &self.preset);
+                        if res.is_ok() {
+                            let _ = store.save_app();
+                        }
+                        res
+                    };
+                    match result {
                         Ok(()) => {
                             self.active_name = name;
-                            let _ = store.save_app();
                             self.flash(format!("{} {}", t(self.lang, "created"), self.active_name));
                         }
                         Err(e) => self.flash(format!("{}: {e}", t(self.lang, "error"))),

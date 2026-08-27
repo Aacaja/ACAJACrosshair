@@ -11,10 +11,10 @@
 //! - `WM_INPUT = 255`（wam.rs:5338）
 
 use log::warn;
-use windows::Win32::Foundation::{HRAWINPUT, LPARAM, HWND};
+use windows::Win32::Foundation::{LPARAM, HWND};
 use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS,
-    RAW_INPUT_DATA_COMMAND_FLAGS, RID_INPUT, RIDEV_INPUTSINK,
+    GetRawInputData, HRAWINPUT, RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE,
+    RAWINPUTDEVICE_FLAGS, RAW_INPUT_DATA_COMMAND_FLAGS, RID_INPUT, RIDEV_INPUTSINK,
 };
 use windows::Win32::UI::WindowsAndMessaging::{RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP};
 
@@ -68,7 +68,7 @@ pub fn handle_raw_input(lparam: LPARAM) -> Option<RawMouseEvent> {
         if raw.header.dwType != 0 {
             return None;
         }
-        let flags = raw.data.mouse.usFlags.0;
+        let flags = u32::from(raw.data.mouse.usFlags.0);
         if flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
             return Some(RawMouseEvent::LeftDown);
         }

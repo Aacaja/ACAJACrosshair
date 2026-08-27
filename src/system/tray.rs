@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, LoadImageW, TrackPopupMenu, HICON, IMAGE_ICON,
-    LR_DEFAULTSIZE, LR_LOADFROMFILE, MF_STRING, TPM_RETURNCMD, TRACK_POPUP_MENU_FLAGS,
+    LR_DEFAULTSIZE, LR_LOADFROMFILE, MF_STRING, TPM_RETURNCMD,
 };
 
 /// 托盘回调消息（挂在宿主窗口上）
@@ -86,7 +86,7 @@ impl Tray {
             self.data.uID = 0;
         }
         if let Some(icon) = self.icon.take() {
-            let _ = unsafe { windows::Win32::Graphics::Gdi::DeleteObject(icon) };
+            let _ = unsafe { windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(icon.0)) };
         }
     }
 
@@ -137,10 +137,10 @@ fn load_icon(path: &str) -> Option<HICON> {
 fn draw_cross_icon() -> Option<HICON> {
     unsafe {
         use windows::Win32::Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, CreateIconIndirect, DeleteDC, DeleteObject,
-            SelectObject, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, ICONINFO,
+            CreateDIBSection, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
         };
         use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 
         let mut bmi: BITMAPINFO = std::mem::zeroed();
         bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;

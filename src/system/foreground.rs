@@ -31,7 +31,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[derive(Clone, Debug)]
 pub enum FgEvent {
     /// 前台进程切换。exe 为大写进程文件名（如 "R5APEX.EXE"）
-    Changed { exe: String, hwnd: HWND },
+    Changed { exe: String },
     /// 前台窗口移动/缩放（已按 100ms 节流）
     Moved { rect: (i32, i32, i32, i32) },
 }
@@ -79,7 +79,7 @@ pub fn start_fg_watcher(tx: Sender<FgEvent>) -> Option<HWINEVENTHOOK> {
             EVENT_SYSTEM_FOREGROUND => {
                 // 排除桌面/任务栏等壳层窗口
                 if let Some(exe) = foreground_exe(hwnd) {
-                    let _ = tx.send(FgEvent::Changed { exe, hwnd });
+                    let _ = tx.send(FgEvent::Changed { exe });
                 }
             }
             EVENT_SYSTEM_MOVESIZEEND => {
