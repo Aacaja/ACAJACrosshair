@@ -3,6 +3,9 @@
 //! S2 里程碑版本：配置层 + 覆盖层渲染已就绪；
 //! 启动后准星显示在屏幕中央，点确定退出（S3 起替换为托盘/热键常驻）。
 
+// 发布版去掉控制台窗口（GUI 子系统）；debug 构建保留控制台便于调试
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
