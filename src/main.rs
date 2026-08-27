@@ -238,6 +238,7 @@ fn msg_thread_main(
     store: Arc<Mutex<PresetStore>>,
     overlay: OverlayHandle,
     stop: Arc<AtomicBool>,
+    quit: Arc<AtomicBool>,
 ) {
     info!("消息线程启动");
 
@@ -301,9 +302,11 @@ fn msg_thread_main(
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
                     info!("收到 WM_QUIT");
-                    // 关闭设置窗口以结束进程
+                    // 关闭设置窗口以结束进程；UI 未开时直接置退出信号
                     if let Some(ctx) = UI_CTX.get() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    } else {
+                        quit.store(true, Ordering::SeqCst);
                     }
                     break;
                 }
@@ -340,6 +343,8 @@ fn msg_thread_main(
                                     info!("托盘退出");
                                     if let Some(ctx) = UI_CTX.get() {
                                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    } else {
+                                        quit.store(true, Ordering::SeqCst);
                                     }
                                     break;
                                 }
@@ -443,6 +448,21 @@ fn main() {
     let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     if already_running {
         warn!("检测到已有实例在运行，本实例退出");
+        // 弹窗提示：避免用户以为"秒退"是 bug
+        let title: Vec<u16> = "ACAJA 已在运行".encode_utf16().chain(std::iter::once(0)).collect();
+        let msg: Vec<u16> =
+            "ACAJA 已经在后台运行（请查看托盘图标或结束旧进程后再打开）。"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                None,
+                windows::core::PCWSTR(msg.as_ptr()),
+                windows::core::PCWSTR(title.as_ptr()),
+                windows::Win32::UI::WindowsAndMessaging::MB_OK,
+            );
+        }
         return;
     }
     std::mem::forget(mutex);
@@ -479,26 +499,52 @@ fn main() {
 
     // ---- 消息线程（Win32 事件） ----
     let stop = Arc::new(AtomicBool::new(false));
+    let quit = Arc::new(AtomicBool::new(false)); // UI 不可用时的全局退出信号（托盘触发）
     let msg_thread = std::thread::Builder::new()
         .name("acaja-msg".into())
         .spawn({
             let store = store.clone();
             let overlay = overlay.clone();
             let stop = stop.clone();
-            move || msg_thread_main(store, overlay, stop)
+            let quit = quit.clone();
+            move || msg_thread_main(store, overlay, stop, quit)
         })
         .expect("spawn msg thread");
 
     // ---- 主线程 = egui 设置窗口（Windows 上必须主线程创建窗口） ----
     info!("启动设置窗口……");
     let ui_overlay = overlay.clone();
-    let ui_result = acaja::ui::run(store, ui_overlay, "ACAJA");
-    match ui_result {
-        Ok(()) => info!("设置窗口已关闭"),
-        Err(e) => {
-            // 窗口创建失败时不退出：准星 + 托盘仍可用
-            warn!("设置窗口创建失败（准星与托盘继续运行）: {e}");
+    let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        acaja::ui::run(store, ui_overlay, "ACAJA")
+    }));
+
+    let ui_ok = match ui_result {
+        Ok(Ok(())) => {
+            info!("设置窗口已关闭");
+            true
         }
+        Ok(Err(e)) => {
+            // 窗口创建失败时不退出：准星 + 托盘继续运行
+            let text = format!("设置窗口启动失败（准星与托盘继续运行）。\n\n错误：{e}\n\n详情见 %APPDATA%/ACAJACrosshair/acaja.log",);
+            warn!("{text}");
+            message_box(&"ACAJA 提示".to_string(), &text);
+            false
+        }
+        Err(_) => {
+            let text = "设置窗口发生内部错误（已捕获）。\n\n准星与托盘继续运行。\n详情见 %APPDATA%/ACAJACrosshair/acaja.log";
+            warn!("{text}");
+            message_box(&"ACAJA 提示".to_string(), &text);
+            false
+        }
+    };
+
+    if !ui_ok {
+        // UI 不可用：常驻模式，等待托盘退出信号（或由消息线程置 quit）
+        info!("无 UI 常驻模式启动（托盘退出结束程序）");
+        while !quit.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        info!("收到退出信号");
     }
 
     // ---- 收尾 ----
@@ -507,4 +553,18 @@ fn main() {
     overlay.close();
     let _ = overlay_thread.join();
     info!("ACAJA 已退出");
+}
+
+/// 弹窗提示（UTF-16 构造，避免 w! 宏仅字面量的限制）
+fn message_box(title: &str, text: &str) {
+    let title_utf16: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let text_utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            None,
+            windows::core::PCWSTR(text_utf16.as_ptr()),
+            windows::core::PCWSTR(title_utf16.as_ptr()),
+            windows::Win32::UI::WindowsAndMessaging::MB_OK,
+        );
+    }
 }
