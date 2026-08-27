@@ -355,6 +355,7 @@ fn msg_thread_main(
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
     shared: Arc<RwLock<SharedPreset>>,
+    gamepad_cfg: Arc<RwLock<acaja::input::gamepad::RuntimeGamepadCfg>>,
 ) {
     info!("消息线程启动");
 
@@ -400,11 +401,7 @@ fn msg_thread_main(
     }
 
     // ---- 手柄 ----
-    let p0 = state.preset();
-    let _gamepad_watcher = start_gamepad(
-        p0.gamepad.trigger_threshold,
-        acaja::input::gamepad::AdsSource::from_config(p0.gamepad.ads_button),
-    );
+    let _gamepad_watcher = start_gamepad(gamepad_cfg.clone());
     let gamepad_rx = _gamepad_watcher.events.clone();
 
     // 初始显示
