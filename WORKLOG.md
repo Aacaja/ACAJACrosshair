@@ -8,7 +8,7 @@
 
 总目标：交付功能完整的 ACAJA v1.0.0——覆盖层 + 配置迁移 + 托盘常驻 + 全局热键 + 前台游戏自动切预设 + 手柄 ADS 自动隐藏 + 现代化双语设置界面。CI 全绿、tag v1.0.0 发布 Release、用户可从 Actions/Releases 直接下载使用。
 
-状态：🚧 进行中
+状态：✅ 完成
 
 干到哪了：
 
@@ -25,13 +25,25 @@
 - **并发 subagent 尝试** ⚠️ —— 创建了 `ui-designer`(gpt-5.6-luna)/`backend-worker`(deepseek-v4-flash) 两个 agent 定义 + `DOCS_DEV_PLAN.md` 四模块并行契约；**4 路并行 subagent 全部被 abort（工具不可用）**。用户授权放弃并行、主控直接编写（用户明确：一切以开发效率为准）。`DOCS_DEV_PLAN.md` 保留为设计文档。
 
 下一步（按序，全部主控直写，每步提交→CI 验证→修错循环）：
-1. 写 `src/system/*`（monitor/hotkey/tray/foreground/autostart）
-2. 写 `src/input/*`（gamepad XInput + raw_mouse）
-3. 写 `src/state.rs`（ADS 状态机 + 预设轮换，含单测）
-4. 写 `src/ui/mod.rs` + `src/ui/preview.rs`（egui 现代化设置窗；strings.rs/fonts.rs 已就绪）
-5. 装配 `src/main.rs`（消息泵 + 全部子系统）+ `lib.rs` 模块声明 + Cargo.toml 加 `Win32_UI_Input`
-6. CI 迭代至全绿 → 文档更新 → tag v1.0.0 发布
+1. ~~写 `src/system/*`（monitor/hotkey/tray/foreground/autostart）~~ ✅
+2. ~~写 `src/input/*`（gamepad XInput + raw_mouse）~~ ✅
+3. ~~写 `src/state.rs`（ADS 状态机 + 预设轮换，含单测）~~ ✅
+4. ~~写 `src/ui/mod.rs` + `src/ui/preview.rs`（egui 现代化设置窗；strings.rs/fonts.rs 已就绪）~~ ✅
+5. ~~装配 `src/main.rs`（消息泵 + 全部子系统）+ `lib.rs` 模块声明 + Cargo.toml 加 `Win32_UI_Input`~~ ✅
+6. ~~CI 迭代至全绿~~ ✅（42 单测）；桌面文档更新 → tag v1.0.0 发布
 
-边界：不碰 `src/config.rs` / `src/i18n.rs` / `src/overlay/*` / `src/ui/strings.rs` / `src/ui/fonts.rs`（已锁定）；不在本机编译；UI 本轮「退出程序」按钮直接 `exit(0)`（托盘常驻后的优雅退出协议后续再补）。
+### 本轮成果（v1.0.0 完整版）
 
-关联：commit 82d209a(S0)…2200238(S2) / 21dc5cc(GUI fix) / 3459af3(README)；仓库 `Aacaja/ACAJACrosshair`；文档 `DOCS_DEV_PLAN.md`。
+**已完成（验证证据）**：
+- S3 系统层：`src/system/*` —— monitor（EnumDisplayMonitors/GetMonitorInfoW 多显示器）、hotkey（RegisterHotKey 每预设热键）、tray（Shell_NotifyIcon + 右键菜单 1001/1002/1003 + 自绘十字图标回退）、foreground（SetWinEventHook 事件驱动前台检测→按 game_bindings 自动切预设 + MOVESIZEEND 窗口吸附）、autostart（注册表 Run 键）
+- S4 输入层：`src/input/*` —— gamepad（XInput 250Hz 轮询，左扳机 ADS/右扳机开火，热插拔降频，`#[link(name="XInput")]` 踩坑记录：SDK 库名是 XInput.lib 不是 xinput1_4.lib）、raw_mouse（RIDEV_INPUTSINK 全局左右键，两阶段 GetRawInputData）
+- S5 UI：`src/ui/*` —— egui 现代化设置窗（深色主题+强调色、棋盘格实时预览、滑块+数值、四象限多色编辑、描边/动态/位置/热键/手柄/预设管理、中英切换、CJK 字体从 msyh.ttc 运行时提取）
+- 集成：`src/main.rs` 主消息泵（WM_HOTKEY/WM_TRAYICON/WM_CONTEXTMENU/事件轮询节拍 10ms）、`src/state.rs`（ADS 四模式状态机 + 预设轮换 + 吸附位置，8 单测）
+
+**CI 证据**：commit 52d2c82 → `test result: ok. 42 passed`、`ACAJA-v1.0.0-x64.exe`（GUI，**8.2MB** 含 egui）。
+
+**踩坑记录（本轮 8 轮修复，已沉淀进 DOCS_DEV_PLAN §4）**：`w!` 宏只收字面量；`FgEvent` 携带 HWND 导致 channel 非 Send；`HRAWINPUT` 在 UI::Input 不在 Foundation；RawInput 在 `Win32::UI::Input` 根模块（feature Win32_UI_Input）；`CreateIconIndirect`/`ICONINFO` 在 WindowsAndMessaging；`MONITORINFOF_PRIMARY` 在 WindowsAndMessaging；`HICON → Param<HGDIOBJ>` 不存在需手工 `HGDIOBJ(icon.0)`；UI 闭包双重 &mut self 借用（color_row 改自由函数、set 闭包改展开、锁作用域先取结果再 flash）；XINPUT_GAMEPAD 实际 16 字节；Drop 类型不能拆字段。
+
+下一步（收尾）：README 状态更新已做 → 打 tag `v1.0.0` 发布 Release（自动发版）→ 用户下载完整版实测（设置界面/托盘/热键/手柄）。
+
+边界：UI「退出程序」按钮本轮用 `exit(0)`（托盘单开设置窗口的优雅协议留待 v1.1）；`hotkey_next_profile` 已接线（热键id=2 循环预设）；「打开设置」托盘项暂为空动作。
