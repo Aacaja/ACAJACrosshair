@@ -11,8 +11,11 @@ build = "build.rs"
 [dependencies]
 # Windows API (Win32) —— 特性按命名空间裁剪，只编译用到的部分
 windows = { version = "0.58", features = [
+    "Foundation_Numerics",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",
