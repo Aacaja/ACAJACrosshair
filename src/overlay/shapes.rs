@@ -358,8 +358,11 @@ mod tests {
     #[test]
     fn rotation_radius_covers_bounds() {
         let g = build(Shape::Cross, &params()).unwrap();
+        // 半臂 20 + 粗细边距 1 + 安全边距 1 = 22 → 旋转安全半径 ≈ 22·√2·1.414…
         let r = rotation_safe_radius(&g);
-        assert!(r > 20.0 && r < 30.0);
+        assert!(r > 35.0 && r < 60.0, "r={r}");
+        // 旋转后必然覆盖未旋转包围盒
+        assert!(r >= (g.max_x.abs() * std::f32::consts::SQRT_2));
     }
 
     #[test]
@@ -367,6 +370,7 @@ mod tests {
         let mut p = params();
         p.thickness = 10.0;
         let g = build(Shape::Cross, &p).unwrap();
-        assert!((g.max_y - 25.0).abs() < 0.01);
+        // 半臂 20 + 粗细/2 边距 5 + 安全边距 1 = 26
+        assert!((g.max_y - 26.0).abs() < 0.01, "max_y={}", g.max_y);
     }
 }
