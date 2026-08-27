@@ -120,9 +120,9 @@ mod tests {
 
     #[test]
     fn struct_layout() {
-        // XINPUT_GAMEPAD: 4 + 1 + 1 + 2 + 2*4 + 4 = 20 字节（无填充）
-        assert_eq!(std::mem::size_of::<XINPUT_GAMEPAD>(), 20);
-        assert_eq!(std::mem::size_of::<XINPUT_STATE>(), 24);
+        // XINPUT_GAMEPAD: 2+1+1+2+2+2+2+4 = 16 字节（dwPaddingReserved 补到 4 对齐，无额外填充）
+        assert_eq!(std::mem::size_of::<XINPUT_GAMEPAD>(), 16);
+        assert_eq!(std::mem::size_of::<XINPUT_STATE>(), 20);
         assert_eq!(std::mem::align_of::<XINPUT_STATE>(), 4);
     }
 

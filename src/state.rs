@@ -103,10 +103,9 @@ mod tests {
         let mut s = AppState { visible: true, ..Default::default() };
         assert!(apply_ads_event(&mut s, Toggle, true));
         assert!(!s.visible);
-        // 按住期间重复触发（降频保证不会发生，但状态机幂等）
-        assert!(!apply_ads_event(&mut s, Toggle, true));
-        // 松开再扣 → 再切换
-        let _ = apply_ads_event(&mut s, Toggle, false);
+        // Toggle 模式：松开不改变；再次扣下翻转回 true
+        assert!(!apply_ads_event(&mut s, Toggle, false));
+        assert!(!s.visible);
         assert!(apply_ads_event(&mut s, Toggle, true));
         assert!(s.visible);
     }

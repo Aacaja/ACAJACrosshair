@@ -67,9 +67,8 @@ mod tests {
         // 伪造：ttcf 头 + numFonts=2 + 两个偏移 [16, 40]
         let mut fake = vec![0u8; 40];
         fake[0..4].copy_from_slice(b"ttcf");
-        fake[8..12].copy_from_slice(&2u32.to_be_bytes());
+        fake[8..12].copy_from_slice(&1u32.to_be_bytes());
         fake[12..16].copy_from_slice(&16u32.to_be_bytes());
-        fake[16..20].copy_from_slice(&40u32.to_be_bytes());
         // 字体区放一个伪 sfnt 头
         fake[16..20].copy_from_slice(&[0x00, 0x01, 0x00, 0x00]);
         let out = extract_first_font(&fake).unwrap();
