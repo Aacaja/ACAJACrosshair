@@ -22,7 +22,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW,
     PostQuitMessage, RegisterClassW, TranslateMessage, WNDCLASSW, WNDCLASS_STYLES,
-    MSG, PM_REMOVE, WM_CONTEXTMENU, WM_HOTKEY, WM_QUIT, WS_POPUP,
+    MSG, PM_REMOVE, WM_CONTEXTMENU, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_QUIT, WS_POPUP,
     WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 use windows::core::{PCWSTR, w};
@@ -490,7 +490,8 @@ fn main() {
 
     // ---- 主线程 = egui 设置窗口（Windows 上必须主线程创建窗口） ----
     info!("启动设置窗口……");
-    let ui_result = acaja::ui::run(store, overlay, "ACAJA");
+    let ui_overlay = overlay.clone();
+    let ui_result = acaja::ui::run(store, ui_overlay, "ACAJA");
     match ui_result {
         Ok(()) => info!("设置窗口已关闭"),
         Err(e) => {
