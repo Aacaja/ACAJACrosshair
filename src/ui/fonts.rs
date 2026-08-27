@@ -1,20 +1,25 @@
-//! 中文字体加载：从系统字体目录加载微软雅黑（msyh.ttc）等。
+//! 中文字体加载：从系统字体目录加载，**插入 egui 前用 ab_glyph 实际验证**。
 //!
-//! egui 的字体解析器不支持 .ttc 集合文件，这里做轻量 TTC 容器解析，
-//! 取出第一个字体（微软雅黑 Regular）交给 egui。仅 20 行，零依赖。
+//! 背景（v1.0.3 修复）：v1.0.1/1.0.2 直接加载 msyh.ttc 提取的第一个字体送入 egui，
+//! 但微软雅黑与 ab_glyph 解析器存在已知兼容问题（InvalidFont panic），导致设置窗口
+//! 整体崩溃。修复策略：
+//! 1. 候选顺序优先纯 TTF（simhei.ttf / Deng.ttf），TTC 提取放后面；
+//! 2. 每个候选先用 ab_glyph（与 egui 同版本 0.2.11）解析验证，失败自动换下一个；
+//! 3. 全部失败返回 None（界面回退英文/系统字体，不再崩溃）。
 
 use std::path::PathBuf;
 
-/// 常见中文字体候选（按优先级）
-const CANDIDATES: [&str; 5] = [
-    r"C:\Windows\Fonts\msyh.ttc",   // 微软雅黑 (TTC)
-    r"C:\Windows\Fonts\msyhbd.ttc", // 微软雅黑 Bold
-    r"C:\Windows\Fonts\simhei.ttf", // 黑体 (TTF)
-    r"C:\Windows\Fonts\Deng.ttf",   // 等线 (TTF)
-    r"C:\Windows\Fonts\simsun.ttc", // 宋体 (TTC)
+/// 常见中文字体候选（按优先级；纯 TTF 优先，TTC 提取次之）
+const CANDIDATES: [&str; 6] = [
+    r"C:\Windows\Fonts\simhei.ttf",   // 黑体（纯 TTF，ab_glyph 兼容良好）
+    r"C:\Windows\Fonts\Deng.ttf",     // 等线（纯 TTF）
+    r"C:\Windows\Fonts\msyh.ttc",     // 微软雅黑（TTC，需提取）
+    r"C:\Windows\Fonts\msyhbd.ttc",   // 雅黑 Bold
+    r"C:\Windows\Fonts\simsun.ttc",   // 宋体（TTC）
+    r"C:\Windows\Fonts\simsun.ttf",   // 宋体（部分版本为 TTF）
 ];
 
-/// 加载第一个可用的中文字体字节（失败返回 None，UI 仍可运行）
+/// 加载第一个可用的中文字体字节（经 ab_glyph 验证；失败返回 None，UI 仍可运行）
 pub fn load_cjk_font() -> Option<Vec<u8>> {
     for name in CANDIDATES {
         let path = PathBuf::from(name);
@@ -23,11 +28,11 @@ pub fn load_cjk_font() -> Option<Vec<u8>> {
         }
         let data = std::fs::read(&path).ok()?;
         let font = extract_first_font(&data)?;
-        // 简单校验：至少包含表头
-        if font.len() < 16 || &font[0..4] != b"OTTO" && &font[0..4] != b"\x00\x01\x00\x00" {
-            continue;
+        // 验证：与 egui/epaint (ab_glyph 0.2.11) 完全一致的解析路径
+        if ab_glyph::FontVec::try_from_vec(font.clone()).is_ok() {
+            return Some(font);
         }
-        return Some(font);
+        log::info!("字体候选 {name} 解析失败，尝试下一个");
     }
     None
 }
@@ -54,22 +59,29 @@ fn extract_first_font(data: &[u8]) -> Option<Vec<u8>> {
     if off0 >= data.len() || off1 > data.len() || off0 >= off1 {
         return None;
     }
-    Some(data[off0..off1].to_vec())
+    let font = &data[off0..off1];
+    // 字体目录起始必须有合法 sfnt 版本（TTF 0x00010000 / CFF "OTTO" / Apple "true"）
+    if font.len() < 16 {
+        return None;
+    }
+    match &font[0..4] {
+        [0x00, 0x01, 0x00, 0x00] | b"OTTO" | b"true" | b"typ1" => Some(font.to_vec()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 构造一个最小合法 TTC 结构（ttcf 头 + 一个偏移），校验提取逻辑
+    /// 构造一个最小合法 TTC 结构（ttcf 头 + 单字体偏移），校验提取逻辑
     #[test]
     fn ttc_extraction() {
-        // 伪造：ttcf 头 + numFonts=2 + 两个偏移 [16, 40]
+        // 伪造：ttcf 头 + numFonts=1 + 一个偏移 [16, 40]；字体区放伪 sfnt 头 + 内容
         let mut fake = vec![0u8; 40];
         fake[0..4].copy_from_slice(b"ttcf");
         fake[8..12].copy_from_slice(&1u32.to_be_bytes());
         fake[12..16].copy_from_slice(&16u32.to_be_bytes());
-        // 字体区放一个伪 sfnt 头
         fake[16..20].copy_from_slice(&[0x00, 0x01, 0x00, 0x00]);
         let out = extract_first_font(&fake).unwrap();
         assert_eq!(out.len(), 24);
@@ -86,5 +98,34 @@ mod tests {
     #[test]
     fn garbage_returns_none() {
         assert!(extract_first_font(&[0u8; 4]).is_none());
+        // 伪造 ttc 但字体区头部非法 → None
+        let mut fake = vec![0u8; 40];
+        fake[0..4].copy_from_slice(b"ttcf");
+        fake[8..12].copy_from_slice(&1u32.to_be_bytes());
+        fake[12..16].copy_from_slice(&16u32.to_be_bytes());
+        fake[16..20].copy_from_slice(b"XXXX");
+        assert!(extract_first_font(&fake).is_none());
+    }
+
+    /// Windows CI 实测：真实系统字体必须能过 ab_glyph 解析（防止回归）
+    #[cfg(windows)]
+    #[test]
+    fn real_system_fonts_parse() {
+        let mut found = 0;
+        for name in CANDIDATES {
+            let path = PathBuf::from(name);
+            if !path.exists() {
+                continue;
+            }
+            let data = std::fs::read(&path).unwrap();
+            if let Some(font) = extract_first_font(&data) {
+                assert!(
+                    ab_glyph::FontVec::try_from_vec(font).is_ok(),
+                    "系统字体解析失败: {name}"
+                );
+                found += 1;
+            }
+        }
+        assert!(found >= 1, "未找到任何可解析的系统字体");
     }
 }

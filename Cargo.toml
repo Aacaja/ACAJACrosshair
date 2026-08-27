@@ -1,6 +1,6 @@
 [package]
 name = "acaja"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 description = "ACAJA - Windows crosshair overlay tool"
 authors = ["Aacaja"]
@@ -38,6 +38,9 @@ egui = "0.30"
 # 数据与序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# 字体验证（与 egui/epaint 同版本，加载系统字体前实测解析）
+ab_glyph = "0.2.11"
 
 # 并发与事件
 crossbeam-channel = "0.5"

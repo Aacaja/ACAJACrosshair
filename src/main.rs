@@ -302,6 +302,7 @@ fn msg_thread_main(
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
                     info!("收到 WM_QUIT");
+                    acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
                     // 关闭设置窗口以结束进程；UI 未开时直接置退出信号
                     if let Some(ctx) = UI_CTX.get() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -336,11 +337,12 @@ fn msg_thread_main(
                             match cmd {
                                 Some(CMD_TOGGLE) => state.toggle_visible(),
                                 Some(CMD_SETTINGS) => {
-                                    // 打开设置窗口（主线程 UI 已关闭时再打开；v1.1 实现）
-                                    info!("托盘「打开设置」（v1.1 实现重新拉起窗口）");
+                                    info!("托盘：打开设置");
+                                    acaja::ui::show_settings_window();
                                 }
                                 Some(CMD_QUIT) => {
                                     info!("托盘退出");
+                                    acaja::ui::QUIT_REQUESTED.store(true, Ordering::SeqCst);
                                     if let Some(ctx) = UI_CTX.get() {
                                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                     } else {

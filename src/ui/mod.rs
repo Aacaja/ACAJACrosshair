@@ -27,6 +27,18 @@ const STATUS_TTL: std::time::Duration = std::time::Duration::from_millis(1600);
 /// egui Context 全局句柄（消息线程在托盘退出时经它关闭设置窗口）
 pub static UI_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
 
+/// 主动退出标记：托盘「退出」时为 true；用户点窗口 X 不会置位（仅隐藏）
+pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 重新打开设置窗口（隐藏状态下恢复显示并聚焦）
+pub fn show_settings_window() {
+    if let Some(ctx) = UI_CTX.get() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+}
+
 pub struct AcajaApp {
     store: Arc<Mutex<PresetStore>>,
     overlay: OverlayHandle,
@@ -650,6 +662,14 @@ impl AcajaApp {
 
 impl eframe::App for AcajaApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // ---- 关闭拦截：点 X = 隐藏到托盘（程序常驻），托盘「退出」才置 QUIT_REQUESTED ----
+        if ctx.input(|i| i.viewport().close_requested())
+            && !QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         // ---- 主题 ----
         let dark = match self.theme.as_str() {
             "light" => false,
