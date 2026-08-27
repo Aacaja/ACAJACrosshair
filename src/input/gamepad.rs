@@ -61,8 +61,33 @@ impl Drop for GamepadWatcher {
     }
 }
 
-/// 启动手柄轮询线程。触发阈值 0-255（模拟量），默认 30。
-pub fn start_gamepad(threshold: u8) -> GamepadWatcher {
+/// 瞄准触发源：扳机（模拟量）或肩键（数字量）
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AdsSource {
+    LeftTrigger,
+    RightTrigger,
+    LeftBumper,
+    RightBumper,
+}
+
+impl AdsSource {
+    /// 从预设的 AdsButton 映射（v1.0.4 起支持肩键）
+    pub fn from_config(b: crate::config::AdsButton) -> Self {
+        match b {
+            crate::config::AdsButton::LeftTrigger => AdsSource::LeftTrigger,
+            crate::config::AdsButton::RightTrigger => AdsSource::RightTrigger,
+            crate::config::AdsButton::LeftBumper => AdsSource::LeftBumper,
+            crate::config::AdsButton::RightBumper => AdsSource::RightBumper,
+        }
+    }
+}
+
+// XINPUT_GAMEPAD 肩键位
+const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0004;
+const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0008;
+
+/// 启动手柄轮询线程。threshold 0-255（扳机模拟量）；ads_source 决定瞄准触发键。
+pub fn start_gamepad(threshold: u8, ads_source: AdsSource) -> GamepadWatcher {
     let (tx, rx): (Sender<GameEvent>, Receiver<GameEvent>) = unbounded();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
@@ -83,8 +108,14 @@ pub fn start_gamepad(threshold: u8) -> GamepadWatcher {
                         connected = true;
                         info!("手柄已连接（XInput 控制器 0）");
                     }
-                    let ads = state.Gamepad.bLeftTrigger >= threshold;
-                    let fire = state.Gamepad.bRightTrigger >= threshold;
+                    let pad = &state.Gamepad;
+                    let ads = match ads_source {
+                        AdsSource::LeftTrigger => pad.bLeftTrigger >= threshold,
+                        AdsSource::RightTrigger => pad.bRightTrigger >= threshold,
+                        AdsSource::LeftBumper => (pad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0,
+                        AdsSource::RightBumper => (pad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0,
+                    };
+                    let fire = pad.bRightTrigger >= threshold;
 
                     if ads != prev_ads {
                         prev_ads = ads;

@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -44,6 +44,8 @@ const MAIN_CLASS: PCWSTR = w!("ACAJAMainWindow");
 /// egui Context 全局句柄（托盘退出时经它关闭设置窗口）
 use acaja::ui::UI_CTX;
 
+use acaja::state::SharedPreset;
+
 // ===========================================================================
 // 主状态（消息线程持有）
 // ===========================================================================
@@ -54,15 +56,20 @@ struct MainState {
     hwnd: HWND,
     tray: Option<Tray>,
     app: AppState,
-    /// 当前生效预设
-    preset: Arc<Preset>,
+    shared: Arc<RwLock<SharedPreset>>,
+    last_version: u64,
     /// 当前前台 exe（大写，用于去重）
     fg_exe: String,
 }
 
 impl MainState {
+    /// 读取当前生效预设（来自共享仓库，UI 的改动即时可见）
+    fn preset(&self) -> Arc<Preset> {
+        self.shared.read().unwrap().preset.clone()
+    }
+
     fn position_for_preset(&self) -> (i32, i32) {
-        let p = &self.preset;
+        let p = self.preset();
         match (p.position.x, p.position.y) {
             (acaja::config::PosVal::Px(x), acaja::config::PosVal::Px(y)) => (x as i32, y as i32),
             (acaja::config::PosVal::Px(x), _) => (
@@ -85,20 +92,41 @@ impl MainState {
 
     fn full_update(&mut self) {
         let pos = self.position_for_preset();
-        self.overlay.update(self.preset.clone(), pos, self.app.visible);
+        let preset = self.preset();
+        self.overlay.update(preset, pos, self.app.visible);
     }
 
+    /// 重新加载当前预设（激活/切换后调用），更新共享仓库并重注册热键
     fn reload_preset(&mut self) {
-        let preset = { self.store.lock().unwrap().get_active().clone() };
-        self.preset = Arc::new(preset);
+        let preset: Arc<Preset> = {
+            let store = self.store.lock().unwrap();
+            Arc::new(store.get_active().clone())
+        };
+        let mut w = self.shared.write().unwrap();
+        w.preset = preset;
+        w.version = w.version.wrapping_add(1);
+        drop(w);
         self.apply_hotkeys();
         self.full_update();
+    }
+
+    /// 检测共享 preset 是否被 UI 更新（版本号变化 → 重同步热键）
+    fn sync_from_ui(&mut self) {
+        let (version, preset) = {
+            let r = self.shared.read().unwrap();
+            (r.version, r.preset.clone())
+        };
+        if version != self.last_version {
+            self.last_version = version;
+            self.preset_arc = Some(preset);
+            self.apply_hotkeys();
+        }
     }
 
     fn apply_hotkeys(&mut self) {
         unreg_hotkey(self.hwnd, HOTKEY_ID_TOGGLE);
         unreg_hotkey(self.hwnd, HOTKEY_ID_NEXT_PRESET);
-        let p = &self.preset;
+        let p = self.preset();
         if !p.hotkey_toggle.is_empty() {
             reg_hotkey(self.hwnd, HOTKEY_ID_TOGGLE, p.hotkey_toggle.modifiers, p.hotkey_toggle.vk);
         }
@@ -109,7 +137,8 @@ impl MainState {
 
     fn toggle_visible(&mut self) {
         self.app.visible = !self.app.visible;
-        self.overlay.update(self.preset.clone(), self.position_for_preset(), self.app.visible);
+        let preset = self.preset();
+        self.overlay.update(preset, self.position_for_preset(), self.app.visible);
         info!("切换准星: visible={}", self.app.visible);
     }
 
@@ -130,21 +159,18 @@ impl MainState {
 
     fn fire_started(&mut self, expand: f32) {
         if self.app.visible && expand > 0.0 {
-            self.overlay.update_with_expand(
-                self.preset.clone(),
-                self.position_for_preset(),
-                true,
-                expand,
-            );
+            let preset = self.preset();
+            self.overlay.update_with_expand(preset, self.position_for_preset(), true, expand);
         }
     }
 
     fn on_right_button(&mut self, down: bool) {
-        if !self.preset.right_click_toggle {
+        let p = self.preset();
+        if !p.right_click_toggle {
             return;
         }
         use acaja::config::RightClickMode::*;
-        let want = match (self.preset.right_click_mode, down) {
+        let want = match (p.right_click_mode, down) {
             (Click, true) => Some(!self.app.visible),
             (Click, false) => None,
             (HoldShow, true) => Some(true),
@@ -155,18 +181,21 @@ impl MainState {
         if let Some(show) = want {
             if show != self.app.visible {
                 self.app.visible = show;
-                self.overlay.update(self.preset.clone(), self.position_for_preset(), show);
+                let preset = self.preset();
+                self.overlay.update(preset, self.position_for_preset(), show);
                 info!("右键切换: visible={show}");
             }
         }
     }
 
     fn on_gamepad(&mut self, ev: GameEvent) {
-        let expand = self.preset.dynamic.fire_expand_px;
+        let p = self.preset();
+        let expand = p.dynamic.fire_expand_px;
         match ev {
             GameEvent::Ads(ads) => {
-                if apply_ads_event(&mut self.app, self.preset.gamepad.ads_mode, ads) {
-                    self.overlay.update(self.preset.clone(), self.position_for_preset(), self.app.visible);
+                if apply_ads_event(&mut self.app, p.gamepad.ads_mode, ads) {
+                    let preset = self.preset();
+                    self.overlay.update(preset, self.position_for_preset(), self.app.visible);
                     info!("手柄 ADS: ads={ads} → visible={}", self.app.visible);
                 }
             }
@@ -239,18 +268,19 @@ fn msg_thread_main(
     overlay: OverlayHandle,
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
+    shared: Arc<RwLock<SharedPreset>>,
 ) {
     info!("消息线程启动");
 
     let hwnd = create_message_window();
-    let initial_preset = Arc::new(store.lock().expect("store lock").get_active().clone());
     let mut state = MainState {
         store,
         overlay: overlay.clone(),
         hwnd,
         tray: None,
         app: AppState { visible: true, ..Default::default() },
-        preset: initial_preset,
+        shared,
+        last_version: 0,
         fg_exe: String::new(),
     };
 
@@ -284,7 +314,11 @@ fn msg_thread_main(
     }
 
     // ---- 手柄 ----
-    let _gamepad_watcher = start_gamepad(state.preset.gamepad.trigger_threshold);
+    let p0 = state.preset();
+    let _gamepad_watcher = start_gamepad(
+        p0.gamepad.trigger_threshold,
+        acaja::input::gamepad::AdsSource::from_config(p0.gamepad.ads_button),
+    );
     let gamepad_rx = _gamepad_watcher.events.clone();
 
     // 初始显示
@@ -295,6 +329,7 @@ fn msg_thread_main(
         if stop.load(Ordering::SeqCst) {
             break;
         }
+        state.sync_from_ui();
 
         // ---- 消息泵（非阻塞 + 事件轮询节拍） ----
         unsafe {
@@ -496,6 +531,12 @@ fn main() {
     let store = Arc::new(Mutex::new(store));
     info!("当前预设：{}", store.lock().unwrap().active_name());
 
+    // ---- 共享预设仓库（UI ↔ 消息线程同步，v1.0.4） ----
+    let shared: Arc<RwLock<SharedPreset>> = Arc::new(RwLock::new(SharedPreset {
+        version: 1,
+        preset: Arc::new(store.lock().unwrap().get_active().clone()),
+    }));
+
     // ---- 覆盖层 ----
     let (overlay, overlay_thread) = acaja::overlay::start();
 
@@ -509,7 +550,8 @@ fn main() {
             let overlay = overlay.clone();
             let stop = stop.clone();
             let quit = quit.clone();
-            move || msg_thread_main(store, overlay, stop, quit)
+            let shared = shared.clone();
+            move || msg_thread_main(store, overlay, stop, quit, shared)
         })
         .expect("spawn msg thread");
 
@@ -517,7 +559,7 @@ fn main() {
     info!("启动设置窗口……");
     let ui_overlay = overlay.clone();
     let ui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        acaja::ui::run(store, ui_overlay, "ACAJA")
+        acaja::ui::run(store, ui_overlay, shared, "ACAJA")
     }));
 
     let ui_ok = match ui_result {

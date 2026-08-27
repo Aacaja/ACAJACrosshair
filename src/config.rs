@@ -46,12 +46,29 @@ pub enum Shape {
     TShape,
     Brackets,
     GapHair,
+    // ---- v1.0.4：Crosshair X 风格扩充 ----
+    /// 实心十字 + 中心点
+    CrossDot,
+    /// X 形（两条对角线）
+    XShape,
+    /// 圆环 + 中心点（狙击风格）
+    RingDot,
+    /// 双圆环
+    DoubleRing,
+    /// 圆环 + 内十字
+    CircleCross,
+    /// 门字形（四边中段各一条线段，Valorant 风格）
+    Gate,
+    /// 向下箭头（∨，射击游戏 ADS 风格）
+    ChevronDown,
+    /// 四角圆点
+    CornerDots,
     CustomImage,
 }
 
 impl Shape {
     /// 全部形状（UI 下拉框顺序）
-    pub const ALL: [Shape; 14] = [
+    pub const ALL: [Shape; 22] = [
         Shape::Cross,
         Shape::Dot,
         Shape::Square,
@@ -65,6 +82,14 @@ impl Shape {
         Shape::TShape,
         Shape::Brackets,
         Shape::GapHair,
+        Shape::CrossDot,
+        Shape::XShape,
+        Shape::RingDot,
+        Shape::DoubleRing,
+        Shape::CircleCross,
+        Shape::Gate,
+        Shape::ChevronDown,
+        Shape::CornerDots,
         Shape::CustomImage,
     ];
 
@@ -311,7 +336,7 @@ pub enum AdsMode {
     HoldShow,
 }
 
-/// 瞄准触发键
+/// 瞄准触发键（v1.0.4 起支持肩键 LB/RB）
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AdsButton {
@@ -319,6 +344,10 @@ pub enum AdsButton {
     #[default]
     LeftTrigger,
     RightTrigger,
+    /// 左肩键 LB / L1
+    LeftBumper,
+    /// 右肩键 RB / R1
+    RightBumper,
 }
 
 /// 手柄相关配置（每个预设独立保存，可随游戏/图内模式切换）

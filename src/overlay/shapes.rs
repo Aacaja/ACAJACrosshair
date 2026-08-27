@@ -178,6 +178,63 @@ pub fn build(shape: Shape, p: &ShapeParams) -> Option<ShapeGeom> {
             ];
             prims.push(Prim::PolyFill { pts, slot: SLOT_MAIN });
         }
+        Shape::CrossDot => {
+            // 实心十字 + 中心点；四肢分色
+            let s = p.arm() + p.expand;
+            arms_solid(&mut prims, s);
+            prims.push(Prim::Dot { cx: 0.0, cy: 0.0, r: p.dot / 2.0, slot: SLOT_MAIN });
+        }
+        Shape::XShape => {
+            // X 形：两条对角线（十字旋转 45° 的等效），主色
+            let s = p.size + p.expand;
+            prims.push(Prim::Line { x1: -s, y1: -s, x2: s, y2: s, slot: SLOT_MAIN });
+            prims.push(Prim::Line { x1: -s, y1: s, x2: s, y2: -s, slot: SLOT_MAIN });
+        }
+        Shape::RingDot => {
+            // 圆环 + 中心点（狙击风格）
+            prims.push(Prim::Ring { cx: 0.0, cy: 0.0, r: (p.size + p.expand) / 2.0, slot: SLOT_MAIN });
+            prims.push(Prim::Dot { cx: 0.0, cy: 0.0, r: p.dot / 2.0, slot: SLOT_MAIN });
+        }
+        Shape::DoubleRing => {
+            // 双圆环：外环 size，内环 0.6×size
+            let r = (p.size + p.expand) / 2.0;
+            prims.push(Prim::Ring { cx: 0.0, cy: 0.0, r, slot: SLOT_MAIN });
+            prims.push(Prim::Ring { cx: 0.0, cy: 0.0, r: r * 0.6, slot: SLOT_MAIN });
+        }
+        Shape::CircleCross => {
+            // 圆环 + 内十字（实心短臂，不触环）
+            let r = (p.size + p.expand) / 2.0;
+            let s = r * 0.65;
+            prims.push(Prim::Ring { cx: 0.0, cy: 0.0, r, slot: SLOT_MAIN });
+            arms_solid(&mut prims, s);
+        }
+        Shape::Gate => {
+            // 门字形：四边中段各一条线段（Valorant 风格），四槽分色
+            let s = p.size + p.expand;
+            let g = p.eff_gap();
+            let half = s * 0.45;
+            prims.push(Prim::Line { x1: -half, y1: -g, x2: half, y2: -g, slot: SLOT_TOP });
+            prims.push(Prim::Line { x1: -half, y1: g, x2: half, y2: g, slot: SLOT_BOTTOM });
+            prims.push(Prim::Line { x1: -g, y1: -half, x2: -g, y2: half, slot: SLOT_LEFT });
+            prims.push(Prim::Line { x1: g, y1: -half, x2: g, y2: half, slot: SLOT_RIGHT });
+        }
+        Shape::ChevronDown => {
+            // 向下箭头（∨）：顶点在下方，左右分色
+            let s = p.size + p.expand;
+            let h = s * 0.5;
+            prims.push(Prim::Line { x1: -s, y1: -h, x2: 0.0, y2: h, slot: SLOT_LEFT });
+            prims.push(Prim::Line { x1: 0.0, y1: h, x2: s, y2: -h, slot: SLOT_RIGHT });
+            joint_dot(&mut prims, 0.0, h, p.thickness, SLOT_LEFT);
+        }
+        Shape::CornerDots => {
+            // 四角圆点（括号的圆点版）
+            let s = p.size * 0.7 + p.expand;
+            let r = (p.dot.max(2.0)) / 2.0;
+            prims.push(Prim::Dot { cx: -s, cy: -s, r, slot: SLOT_MAIN });
+            prims.push(Prim::Dot { cx: s, cy: -s, r, slot: SLOT_MAIN });
+            prims.push(Prim::Dot { cx: -s, cy: s, r, slot: SLOT_MAIN });
+            prims.push(Prim::Dot { cx: s, cy: s, r, slot: SLOT_MAIN });
+        }
         Shape::CustomImage => return None,
     }
 
@@ -203,6 +260,14 @@ fn arms_quad(prims: &mut Vec<Prim>, gap: f32, arm_len: f32) {
     prims.push(Prim::Line { x1: 0.0, y1: gap, x2: 0.0, y2: gap + arm_len, slot: SLOT_BOTTOM });
     prims.push(Prim::Line { x1: -gap - arm_len, y1: 0.0, x2: -gap, y2: 0.0, slot: SLOT_LEFT });
     prims.push(Prim::Line { x1: gap, y1: 0.0, x2: gap + arm_len, y2: 0.0, slot: SLOT_RIGHT });
+}
+
+/// 实心十字四臂（填满到中心，带四象限分色）
+fn arms_solid(prims: &mut Vec<Prim>, arm_len: f32) {
+    prims.push(Prim::Line { x1: 0.0, y1: -arm_len, x2: 0.0, y2: 0.0, slot: SLOT_TOP });
+    prims.push(Prim::Line { x1: 0.0, y1: 0.0, x2: 0.0, y2: arm_len, slot: SLOT_BOTTOM });
+    prims.push(Prim::Line { x1: -arm_len, y1: 0.0, x2: 0.0, y2: 0.0, slot: SLOT_LEFT });
+    prims.push(Prim::Line { x1: 0.0, y1: 0.0, x2: arm_len, y2: 0.0, slot: SLOT_RIGHT });
 }
 
 /// 角点拼接圆点（盖住粗线 butt cap 的内角缺口）

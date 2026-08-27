@@ -42,6 +42,8 @@ pub fn show_settings_window() {
 pub struct AcajaApp {
     store: Arc<Mutex<PresetStore>>,
     overlay: OverlayHandle,
+    shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
+    template_name: &'static str,
 
     /// 工作副本（界面直接编辑此预设）
     preset: Preset,
@@ -69,6 +71,7 @@ pub struct AcajaApp {
 pub fn run(
     store: Arc<Mutex<PresetStore>>,
     overlay: OverlayHandle,
+    shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
     title: &'static str,
 ) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -81,7 +84,7 @@ pub fn run(
     eframe::run_native(
         title,
         options,
-        Box::new(move |cc| Ok(Box::new(AcajaApp::new(cc, store, overlay)) as Box<dyn eframe::App>)),
+        Box::new(move |cc| Ok(Box::new(AcajaApp::new(cc, store, overlay, shared)) as Box<dyn eframe::App>)),
     )
 }
 
@@ -90,6 +93,7 @@ impl AcajaApp {
         cc: &eframe::CreationContext<'_>,
         store: Arc<Mutex<PresetStore>>,
         overlay: OverlayHandle,
+        shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
     ) -> Self {
         // ---- 中文字体 ----
         if let Some(font_bytes) = fonts::load_cjk_font() {
@@ -120,6 +124,8 @@ impl AcajaApp {
         let mut app = AcajaApp {
             store,
             overlay,
+            shared,
+            template_name: "tpl_apex",
             preset,
             active_name,
             dirty: true,
@@ -194,8 +200,14 @@ impl AcajaApp {
             (PosVal::Px(x), _) => (x as i32, crate::overlay::primary_screen_center().1),
             (_, PosVal::Px(y)) => (crate::overlay::primary_screen_center().0, y as i32),
         };
-        self.overlay
-            .update(Arc::new(self.preset.clone()), pos, self.visible);
+        let p = Arc::new(self.preset.clone());
+        // 同步到共享仓库：消息线程（手柄/热键/右键/前台）读取同一份数据
+        {
+            let mut w = self.shared.write().unwrap();
+            w.preset = p.clone();
+            w.version = w.version.wrapping_add(1);
+        }
+        self.overlay.update(p, pos, self.visible);
     }
 
     // ---- UI 区块 ----
@@ -276,6 +288,30 @@ impl AcajaApp {
 
     fn shape_style_ui(&mut self, ui: &mut Ui) {
         Self::section_title(ui, t(self.lang, "shape_style"));
+
+        // ---- 风格模板（一键套用 Crosshair X 风格） ----
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(t(self.lang, "templates")).size(12.0).strong());
+            ComboBox::from_id_salt("tpl")
+                .width(160.0)
+                .selected_text(self.template_name)
+                .show_ui(ui, |ui| {
+                    for (key, _apply) in TEMPLATES {
+                        if ui.selectable_label(self.template_name == key, t(self.lang, key)).clicked() {
+                            self.template_name = key;
+                        }
+                    }
+                });
+            if ui.button(t(self.lang, "template_apply")).clicked() {
+                if let Some((_key, apply)) = TEMPLATES.iter().find(|(k, _)| *k == self.template_name) {
+                    apply(&mut self.preset);
+                    self.sync_hex_buffers();
+                    self.dirty = true;
+                    self.flash(t(self.lang, "template_applied").to_string());
+                }
+            }
+        });
+        ui.add_space(2.0);
 
         egui::Grid::new("shape_grid").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
             ui.label(t(self.lang, "shape"));
@@ -377,6 +413,90 @@ impl AcajaApp {
         }
     }
 }
+
+/// 风格模板：借鉴 Crosshair X 的常见预设风格，一键套用参数。
+/// key 同时是 strings.rs 的文案 key。
+const TEMPLATES: [(&str, fn(&mut Preset)); 8] = [
+    ("tpl_apex", |p: &mut Preset| {
+        // Apex 风格：四段 + 中心点，半透明白
+        p.shape = Shape::HollowCrossDot;
+        p.size = 14.0;
+        p.thickness = 1.6;
+        p.hollow.gap = 3.0;
+        p.color = "#FFFFFF".into();
+        p.multicolor = false;
+        p.opacity = 0.85;
+        p.hollow.center_dot_size = 2.0;
+        p.dynamic.fire_expand_px = 4.0;
+        p.dynamic.recover_ms = 140;
+    }),
+    ("tpl_valorant", |p: &mut Preset| {
+        // Valorant 风格：瘦四段，青绿色
+        p.shape = Shape::Gate;
+        p.size = 16.0;
+        p.thickness = 1.0;
+        p.hollow.gap = 2.0;
+        p.color = "#3DFF6E".into();
+        p.multicolor = false;
+        p.opacity = 0.9;
+    }),
+    ("tpl_cs2", |p: &mut Preset| {
+        // CS2 风格：经典绿十字
+        p.shape = Shape::Cross;
+        p.size = 18.0;
+        p.thickness = 1.5;
+        p.hollow.gap = 0.0;
+        p.color = "#00FF00".into();
+        p.multicolor = false;
+        p.opacity = 0.9;
+    }),
+    ("tpl_sniper", |p: &mut Preset| {
+        // 狙击风格：大圆环 + 中心点
+        p.shape = Shape::RingDot;
+        p.size = 26.0;
+        p.thickness = 2.0;
+        p.color = "#FFFFFF".into();
+        p.multicolor = false;
+        p.opacity = 0.7;
+        p.hollow.center_dot_size = 2.5;
+    }),
+    ("tpl_classic", |p: &mut Preset| {
+        // 经典默认：红十字
+        p.shape = Shape::Cross;
+        p.size = 20.0;
+        p.thickness = 2.0;
+        p.hollow.gap = 0.0;
+        p.color = "#FF0000".into();
+        p.multicolor = false;
+        p.opacity = 0.8;
+    }),
+    ("tpl_thick_gate", |p: &mut Preset| {
+        // 厚门形：粗线段，战斗可见性
+        p.shape = Shape::Gate;
+        p.size = 24.0;
+        p.thickness = 4.0;
+        p.hollow.gap = 3.0;
+        p.color = "#FFFFFF".into();
+        p.multicolor = false;
+        p.opacity = 1.0;
+    }),
+    ("tpl_dot", |p: &mut Preset| {
+        // 纯点：最小遮挡
+        p.shape = Shape::Dot;
+        p.size = 6.0;
+        p.color = "#FF2D2D".into();
+        p.opacity = 0.9;
+    }),
+    ("tpl_cross_x", |p: &mut Preset| {
+        // X 形准星
+        p.shape = Shape::XShape;
+        p.size = 18.0;
+        p.thickness = 2.0;
+        p.color = "#FFA500".into();
+        p.multicolor = false;
+        p.opacity = 0.85;
+    }),
+];
 
 /// 颜色编辑行：色块 + hex 输入（静态函数避免 self 双重借用）
 fn color_row_ui(
@@ -554,10 +674,12 @@ impl AcajaApp {
                 });
             ui.label(t(self.lang, "ads_button"));
             ComboBox::from_id_salt("ads_button")
-                .width(150.0)
+                .width(170.0)
                 .selected_text(match self.preset.gamepad.ads_button {
                     AdsButton::LeftTrigger => t(self.lang, "ads_left_trigger"),
                     AdsButton::RightTrigger => t(self.lang, "ads_right_trigger"),
+                    AdsButton::LeftBumper => t(self.lang, "ads_left_bumper"),
+                    AdsButton::RightBumper => t(self.lang, "ads_right_bumper"),
                 })
                 .show_ui(ui, |ui| {
                     if ui
@@ -568,6 +690,18 @@ impl AcajaApp {
                     }
                     if ui
                         .selectable_value(&mut self.preset.gamepad.ads_button, AdsButton::RightTrigger, t(self.lang, "ads_right_trigger"))
+                        .changed()
+                    {
+                        self.dirty = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.preset.gamepad.ads_button, AdsButton::LeftBumper, t(self.lang, "ads_left_bumper"))
+                        .changed()
+                    {
+                        self.dirty = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.preset.gamepad.ads_button, AdsButton::RightBumper, t(self.lang, "ads_right_bumper"))
                         .changed()
                     {
                         self.dirty = true;

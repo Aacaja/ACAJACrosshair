@@ -3,6 +3,15 @@
 //! 所有函数都不触碰 Win32，保证 CI 上可完整单测。
 
 use crate::config::AdsMode;
+use std::sync::Arc;
+
+/// 共享的当前生效预设：UI 每次推送覆盖层时版本号 +1；消息线程检测版本变化后重同步热键。
+/// （v1.0.4 修复：此前 UI 与消息线程各持一份 preset 副本，手柄/热键事件使用旧副本导致
+/// 样式回跳与位置漂移）
+pub struct SharedPreset {
+    pub version: u64,
+    pub preset: Arc<crate::config::Preset>,
+}
 
 /// 运行时状态
 #[derive(Clone, Copy, Debug, Default)]
