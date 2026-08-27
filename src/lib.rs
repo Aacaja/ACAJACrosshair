@@ -10,6 +10,9 @@
 //!
 //! 当前为 S0 骨架，仅提供品牌常量与应用目录，供 main 与测试使用。
 
+pub mod config;
+pub mod i18n;
+
 /// 品牌名（英文）
 pub const APP_NAME: &str = "ACAJA";
 /// 品牌名（中文展示）
