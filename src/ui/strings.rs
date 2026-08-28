@@ -14,9 +14,8 @@ pub fn t(lang: Lang, key: &str) -> &'static str {
 fn zh(key: &str) -> &'static str {
     match key {
         "title" => "ACAJA 准星设置",
-        "subtitle" => "设置会自动保存，下次打开继续沿用",
-        "tray_minimize" => "后台运行（隐藏窗口，托盘可重开）",
-        "close_quits" => "点右上角 X 退出程序",
+        "subtitle" => "修改实时生效；关闭本窗口后准星与托盘继续运行",
+        "close_quits" => "关闭窗口即保存（托盘右键可重新打开设置）",
         "language" => "语言",
         "theme" => "主题",
         "theme_auto" => "自动",
@@ -133,9 +132,8 @@ fn zh(key: &str) -> &'static str {
 fn en(key: &str) -> &'static str {
     match key {
         "title" => "ACAJA Crosshair Settings",
-        "subtitle" => "Settings auto-save and restore on next launch",
-        "tray_minimize" => "Run in Background (hide window)",
-        "close_quits" => "Close (X) quits the app",
+        "subtitle" => "Changes apply live; closing this window keeps crosshair & tray running",
+        "close_quits" => "Closing saves (tray menu re-opens settings)",
         "language" => "Language",
         "theme" => "Theme",
         "theme_auto" => "Auto",

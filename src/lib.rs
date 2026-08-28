@@ -13,6 +13,7 @@
 pub mod config;
 pub mod i18n;
 pub mod input;
+pub mod ipc;
 pub mod overlay;
 pub mod state;
 pub mod system;

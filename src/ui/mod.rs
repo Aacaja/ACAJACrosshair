@@ -1,6 +1,6 @@
 //! ACAJA 设置窗口（egui 现代化界面）。
 //!
-//! - 工作副本模式：界面上所有改动先落到 `self.preset`，帧末统一推给 overlay；
+//! - 工作副本模式：界面上所有改动先落到 `self.preset`，帧末经 IPC 推给后台壳进程；
 //! - 「保存预设」才持久化到磁盘；语言/主题即时持久化到 app.json；
 //! - 退出按钮直接退出进程（托盘常驻后的优雅退出协议后续版再做）。
 
@@ -18,46 +18,15 @@ use crate::config::{
     AdsButton, AdsMode, Hotkey, PosVal, Preset, PresetStore, RightClickMode, Shape,
 };
 use crate::i18n::Lang;
-use crate::overlay::OverlayHandle;
 use crate::ui::strings::{ads_mode_name, shape_name, t};
 
 const ACCENT: Color32 = Color32::from_rgb(10, 132, 255);
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_millis(1600);
 
-/// egui Context 全局句柄（消息线程在托盘退出时经它关闭设置窗口）
-pub static UI_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
-
-/// 后台隐藏状态（用于渲染 ≤1fps 压制，替代不可靠的窗口可见性查询）
-pub static UI_HIDDEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// 主动退出标记：托盘「退出」时为 true；用户点窗口 X 不会置位
-pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// 设置窗口当前是否打开（内存优化：窗口关闭后 UI 全部资源被释放）
-pub static UI_OPEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// 请求打开设置窗口。返回 true = 窗口已在显示（已聚焦）；false = 由主线程重新创建。
-pub fn show_settings_window() -> bool {
-    if UI_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
-        UI_HIDDEN.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(ctx) = UI_CTX.get() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
-        true
-    } else {
-        false
-    }
-}
-
 pub struct AcajaApp {
     store: Arc<Mutex<PresetStore>>,
-    overlay: OverlayHandle,
-    shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
+    /// 最近一次向后端推送时间（IPC 节流）
+    last_send: std::time::Instant,
     template_name: &'static str,
 
     /// 工作副本（界面直接编辑此预设）
@@ -82,11 +51,9 @@ pub struct AcajaApp {
     hotkey_buf: String,
 }
 
-/// 启动设置窗口（阻塞直到窗口关闭；返回后可安全清理 overlay）
+/// 启动设置窗口（独立进程模式：阻塞直到窗口关闭，关闭即进程结束）
 pub fn run(
     store: Arc<Mutex<PresetStore>>,
-    overlay: OverlayHandle,
-    shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
     title: &'static str,
 ) -> eframe::Result<()> {
     // 窗口图标：内置品牌 A 图标（64px PNG → egui IconData）
@@ -110,20 +77,12 @@ pub fn run(
     eframe::run_native(
         title,
         options,
-        Box::new(move |cc| Ok(Box::new(AcajaApp::new(cc, store, overlay, shared)) as Box<dyn eframe::App>)),
+        Box::new(move |cc| Ok(Box::new(AcajaApp::new(cc, store)) as Box<dyn eframe::App>)),
     )
 }
 
 impl AcajaApp {
-    fn new(
-        cc: &eframe::CreationContext<'_>,
-        store: Arc<Mutex<PresetStore>>,
-        overlay: OverlayHandle,
-        shared: Arc<std::sync::RwLock<crate::state::SharedPreset>>,
-    ) -> Self {
-        // 标记窗口打开（内存/CPU 决策依据）
-        UI_OPEN.store(true, std::sync::atomic::Ordering::SeqCst);
-
+    fn new(cc: &eframe::CreationContext<'_>, store: Arc<Mutex<PresetStore>>) -> Self {
         // ---- 中文字体 ----
         if let Some(font_bytes) = fonts::load_cjk_font() {
             let mut fonts = egui::FontDefinitions::default();
@@ -140,9 +99,6 @@ impl AcajaApp {
             info!("未找到中文字体，界面将回退系统字体");
         }
 
-        // 注册全局句柄（托盘退出时关闭窗口）
-        let _ = UI_CTX.set(cc.egui_ctx.clone());
-
         let store_guard = store.lock().unwrap();
         let preset = store_guard.get_active().clone();
         let active_name = store_guard.active_name();
@@ -152,8 +108,7 @@ impl AcajaApp {
 
         let mut app = AcajaApp {
             store,
-            overlay,
-            shared,
+            last_send: std::time::Instant::now(),
             template_name: "tpl_apex",
             preset,
             active_name,
@@ -222,16 +177,18 @@ impl AcajaApp {
         self.dirty = true;
     }
 
-    fn push_to_overlay(&mut self) {
-        let pos = crate::state::resolve_position(&self.preset);
-        let p = Arc::new(self.preset.clone());
-        // 同步到共享仓库：消息线程（手柄/热键/右键/前台）读取同一份数据
-        {
-            let mut w = self.shared.write().unwrap();
-            w.preset = p.clone();
-            w.version = w.version.wrapping_add(1);
+    /// 实时推送最新参数到后台壳进程（WM_COPYDATA，33ms 节流）。
+    /// 后端起覆盖层/热键/手柄即时更新；找不到后端（异常）则静默，保存仍走文件。
+    fn send_to_backend(&mut self) {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_send) < std::time::Duration::from_millis(33) {
+            return;
         }
-        self.overlay.update(p, pos, self.visible);
+        self.last_send = now;
+        let json = crate::ipc::preset_payload(&self.preset, self.visible);
+        if let Some(hwnd) = crate::ipc::find_backend() {
+            let _ = crate::ipc::send_json(hwnd, crate::ipc::IPC_TAG_PRESET, &json);
+        }
     }
 
     // ---- UI 区块 ----
@@ -279,17 +236,7 @@ impl AcajaApp {
         });
         ui.label(RichText::new(t(self.lang, "subtitle")).size(11.0).color(ui.visuals().weak_text_color()));
         ui.horizontal(|ui| {
-            if ui.button(t(self.lang, "tray_minimize")).clicked() {
-                // v1.0.11：后台运行 = 保存 + 真正隐藏（任务栏无标签，托盘常驻）。
-                // update() 中已对隐藏状态做 ≤1fps 渲染压制，杜绝 v1.0.8 的 6% 空转。
-                let (name, preset) = (self.active_name.clone(), self.preset.clone());
-                let _ = self.store.lock().unwrap().save_preset(&name, &preset);
-                UI_HIDDEN.store(true, std::sync::atomic::Ordering::SeqCst);
-                if let Some(ctx) = UI_CTX.get() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-            }
+            // v1.1.0：设置进程独立——本窗口关闭即退出本进程，准星与托盘仍在主进程后台运行
             ui.label(RichText::new(t(self.lang, "close_quits")).size(10.5).weak());
         });
         ui.add_space(6.0);
@@ -834,13 +781,6 @@ impl AcajaApp {
 
 impl eframe::App for AcajaApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // ---- 后台（隐藏）状态：压制渲染 ≤1fps ----
-        // 隐藏窗口会失去 vsync 节流，若有重绘源会空转（曾实测 6% CPU）。
-        // 隐藏期间强制最低帧率，每帧重排 1s 后重绘 -> 渲染频率 ≤1fps，CPU 可忽略。
-        if UI_HIDDEN.load(std::sync::atomic::Ordering::SeqCst) {
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
-        }
-
         // ---- 主题 ----
         let dark = match self.theme.as_str() {
             "light" => false,
@@ -882,17 +822,15 @@ impl eframe::App for AcajaApp {
                     });
             });
 
-        // ---- 帧末推送覆盖层 ----
+        // ---- 帧末推送后端进程 ----
         if self.dirty {
             self.dirty = false;
-            self.push_to_overlay();
+            self.send_to_backend();
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // 窗口关闭：释放 UI 标记（UI 资源随 eframe 一并释放）
-        UI_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
-        // v1.0.7：退出前自动保存当前准星设置 → 下次打开沿用（不需要手动点保存）
+        // 退出前自动保存当前准星设置 → 下次打开沿用（不需要手动点保存）
         let (name, preset) = (self.active_name.clone(), self.preset.clone());
         let result = {
             let mut store = self.store.lock().unwrap();
