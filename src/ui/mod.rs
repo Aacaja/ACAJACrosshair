@@ -394,7 +394,7 @@ impl AcajaApp {
         painter.hline(
             Rangef::new(rect.left() + 12.0, rect.right() - 12.0),
             rect.top() + 12.0,
-            BORDER,
+            egui::Stroke::new(1.0, BORDER),
         );
 
         let inner = rect.shrink2(egui::vec2(12.0, 8.0));
