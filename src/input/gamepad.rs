@@ -115,7 +115,7 @@ pub const WAKE_MSG: u32 = 0x8000 + 66;
 /// 有事件时向 `wake_hwnd` 投递 WAKE_MSG（主线程改用 MsgWait 后由它实时唤醒）。
 pub fn start_gamepad(
     cfg: Arc<RwLock<RuntimeGamepadCfg>>,
-    wake_hwnd: Option<windows::Win32::Foundation::HWND>,
+    wake_hwnd: Option<isize>,
 ) -> GamepadWatcher {
     let (tx, rx): (Sender<GameEvent>, Receiver<GameEvent>) = unbounded();
     let stop = Arc::new(AtomicBool::new(false));
@@ -181,9 +181,10 @@ pub fn start_gamepad(
 }
 
 /// 向主消息窗口投递唤醒消息（异步，极轻）
-fn wake(hwnd: Option<HWND>) {
+fn wake(hwnd: Option<isize>) {
     if let Some(h) = hwnd {
-        let _ = unsafe { PostMessageW(h, WAKE_MSG, windows::Win32::Foundation::WPARAM(0), windows::Win32::Foundation::LPARAM(0)) };
+        let hwnd = HWND(h as *mut std::ffi::c_void);
+        let _ = unsafe { PostMessageW(hwnd, WAKE_MSG, windows::Win32::Foundation::WPARAM(0), windows::Win32::Foundation::LPARAM(0)) };
     }
 }
 

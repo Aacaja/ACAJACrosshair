@@ -506,7 +506,7 @@ fn backend_process_main() {
         warn!("Raw Input 注册失败: {e}");
     }
 
-    let _gamepad_watcher = start_gamepad(state.gamepad_cfg.clone(), Some(state.hwnd));
+    let _gamepad_watcher = start_gamepad(state.gamepad_cfg.clone(), Some(state.hwnd.0 as isize));
     let gamepad_rx = _gamepad_watcher.events.clone();
 
     // 初始显示 + 拉起设置进程（沿用「双击即见设置窗」的体验）
