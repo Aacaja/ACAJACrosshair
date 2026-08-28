@@ -343,6 +343,19 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
                         }
                     }
                 }
+                    WM_INPUT => {
+                        if let Some(ev) = handle_raw_input(msg.lParam) {
+                            match ev {
+                                RawMouseEvent::LeftDown => {
+                                    let expand = state.preset().dynamic.fire_expand_px;
+                                    state.fire_started(expand);
+                                }
+                                RawMouseEvent::RightDown => state.on_right_button(true),
+                                RawMouseEvent::RightUp => state.on_right_button(false),
+                                RawMouseEvent::LeftUp => {}
+                            }
+                        }
+                    }
                 _ => {}
             }
         }

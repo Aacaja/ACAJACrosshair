@@ -40,6 +40,7 @@ pub fn show_settings_window() -> bool {
     if UI_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
         if let Some(ctx) = UI_CTX.get() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         true
@@ -274,14 +275,13 @@ impl AcajaApp {
         ui.label(RichText::new(t(self.lang, "subtitle")).size(11.0).color(ui.visuals().weak_text_color()));
         ui.horizontal(|ui| {
             if ui.button(t(self.lang, "tray_minimize")).clicked() {
-                // v1.0.10：后台运行 = 保存 + 最小化到任务栏。
-                // 不关闭/隐藏窗口：隐藏会失去 vsync 节流导致渲染空转（CPU 6%），
-                // 关闭窗口的清理流程存在不确定阻塞（v1.0.9 卡死）。
-                // 最小化时窗口保持可见状态，与「设置窗开着」一样的事件驱动低占用。
+                // v1.0.11：后台运行 = 保存 + 真正隐藏（任务栏无标签，托盘常驻）。
+                // update() 中已对隐藏状态做 ≤1fps 渲染压制，杜绝 v1.0.8 的 6% 空转。
                 let (name, preset) = (self.active_name.clone(), self.preset.clone());
                 let _ = self.store.lock().unwrap().save_preset(&name, &preset);
                 if let Some(ctx) = UI_CTX.get() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
             }
             ui.label(RichText::new(t(self.lang, "close_quits")).size(10.5).weak());
@@ -828,6 +828,14 @@ impl AcajaApp {
 
 impl eframe::App for AcajaApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // ---- 后台（隐藏）状态：压制渲染 ≤1fps ----
+        // 隐藏窗口会失去 vsync 节流，若有重绘源会空转（曾实测 6% CPU）。
+        // 隐藏期间强制最低帧率，每帧重排 1s 后重绘 -> 渲染频率 ≤1fps，CPU 可忽略。
+        let hidden = ctx.input(|i| i.viewport().visible) == Some(false);
+        if hidden {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+
         // ---- 主题 ----
         let dark = match self.theme.as_str() {
             "light" => false,
