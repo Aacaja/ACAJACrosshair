@@ -29,7 +29,7 @@ use windows::core::{PCWSTR, w};
 
 use acaja::config::{migrate_legacy, Preset, PresetStore};
 use acaja::input::gamepad::{GameEvent, start_gamepad};
-use acaja::input::raw_mouse::register_raw_mouse;
+use acaja::input::raw_mouse::{RawMouseEvent, handle_raw_input, register_raw_mouse};
 use acaja::overlay::OverlayHandle;
 use acaja::state::{AppState, apply_ads_event, next_preset, snap_position};
 use acaja::system::foreground::{FgEvent, start_fg_watcher};
