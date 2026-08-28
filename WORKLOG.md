@@ -4,6 +4,22 @@
 
 ---
 
+## [2026-08-28] v1.1.0：设置界面拆分为独立进程（双进程架构，内存对齐 RTSS 级别）
+
+总目标：用户要求「独立 UI 进程」成品——后台壳 ~15MB 常驻，设置界面按需拉起、关闭即彻底释放（~65MB）。
+
+状态：✅ 完成（v1.1.0 CI success）
+
+干到哪了：
+- **架构**：`acaja.exe` 默认 = 后台壳（D2D 覆盖层 + 输入 + 托盘 + 热键 + 前台检测；不再链接 eframe）；`acaja.exe --ui` = 设置进程（egui，独立互斥体 "ACAJACrosshairSettings" 单例）。
+- **IPC**：`src/ipc.rs` — WM_COPYDATA 同步通道（windows-rs 0.58 未绑定 COPYDATASTRUCT，手工 repr-C 定义）；负载 = `{"v":visible,"p":<preset json>}`；UI 帧末 33ms 节流推送；主进程 WM_COPYDATA 分支 → 反序列化 → shared/hotkey/gamepad_cfg/overlay 全链路同步。
+- **进程生命周期**：主进程托盘「打开设置」/启动即 spawn `--ui`；UI 点 X = 保存 + 本进程退出（主进程不动）；UI 每 2s FindWindow("ACAJABackend") 自检，主进程退出/崩溃 → UI 自动退出。主进程消息窗口标题定名 "ACAJABackend" 作为 FindWindow 依据（UI 窗口标题仍 "ACAJA"）。
+- **清理**：ui/mod.rs 删除 overlay/shared 耦合与全部静态（UI_CTX/UI_OPEN/UI_HIDDEN/QUIT_REQUESTED/show_settings_window/后台按钮），push_to_overlay → send_to_backend；main.rs 全重写（backend_process_main + ui_process_main 分流），事件驱动 select 循环保留。
+- 验证证据：commit 8b73f2d → CI success（45+ 单测）。
+
+下一步：用户实测 v1.1.0——后台壳内存（预期 ~15MB）与设置窗关闭彻底释放；托盘开设置实时同步。README 架构节待同步双进程。
+
+---
 ## [2026-08-28] v1.0.11：后台=真隐藏（任务栏干净）+ 托盘右键修复 + 右键切换/开火真正接线
 
 总目标：① 后台运行不再留任务栏标签（最小化被否）② 托盘右键菜单无反应 ③ 鼠标右键点击/长按隐藏准星功能“缺失”（实际是功能从未接线）④ 内存进一步优化给出路径。
