@@ -201,9 +201,11 @@ impl AcajaApp {
             let json = crate::ipc::preset_payload(&self.preset, self.visible);
             let _ = crate::ipc::send_json(hwnd, crate::ipc::IPC_TAG_PRESET, &json);
             self.backend_ok = true;
+            log::info!("IPC: 已推送给主进程 hwnd={hwnd:?}");
         } else {
             self.backend_ok = false;
             self.pending_send = true;
+            log::info!("IPC: 未找到主进程窗口，挂起重试");
         }
     }
 

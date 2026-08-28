@@ -89,6 +89,7 @@ impl MainState {
     /// UI 进程经 WM_COPYDATA 推送的实时修改
     fn apply_ipc_payload(&mut self, json: &str) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+            info!("IPC: JSON 解析失败, len={}", json.len());
             return;
         };
         let Some(pv) = v.get("p") else { return };
@@ -97,6 +98,7 @@ impl MainState {
         };
         let visible = v.get("v").and_then(|x| x.as_bool()).unwrap_or(self.app.visible);
         let preset = Arc::new(preset);
+        info!("IPC: 收到 UI 推送 shape={:?} visible={}", preset.shape, visible);
         {
             let mut w = self.shared.write().unwrap();
             w.preset = preset;
@@ -352,6 +354,7 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
                 }
                 WM_TRAYICON => {
                     let what = (msg.lParam.0 as u32) & 0xFFFF;
+                    info!("托盘消息: what={what:#x}");
                     if what == WM_LBUTTONDBLCLK {
                         state.toggle_visible();
                     } else if what == WM_RBUTTONUP || what == WM_CONTEXTMENU {
@@ -375,6 +378,7 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
                     }
                 }
                 WM_COPYDATA => {
+                    info!("IPC: 收到 WM_COPYDATA");
                     // 设置进程推送的实时修改
                     let pcds = msg.lParam.0 as *const acaja::ipc::CopyDataStruct;
                     if !pcds.is_null() && (*pcds).dwData == IPC_TAG_PRESET {
@@ -390,6 +394,7 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
                 }
                 WM_INPUT => {
                     if let Some(ev) = handle_raw_input(msg.lParam) {
+                        info!("RawInput: {ev:?}");
                         match ev {
                             RawMouseEvent::LeftDown => {
                                 let expand = state.preset().dynamic.fire_expand_px;
@@ -413,12 +418,14 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
 // ===========================================================================
 
 fn init_logging() -> Option<PathBuf> {
-    if !cfg!(debug_assertions) {
-        return None; // 发行版不生成日志文件
+    // --diag 诊断模式：发行版也写日志（acaja-diag.log）；平时保持零日志
+    let diag = std::env::args().any(|a| a == "--diag");
+    if !cfg!(debug_assertions) && !diag {
+        return None;
     }
     let dir = acaja::appdata_dir().ok()?;
     std::fs::create_dir_all(&dir).ok()?;
-    let log_path = dir.join("acaja.log");
+    let log_path = dir.join(if diag { "acaja-diag.log" } else { "acaja.log" });
     let file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok()?;
     simplelog::WriteLogger::init(
         simplelog::LevelFilter::Info,
@@ -541,16 +548,20 @@ fn backend_process_main() {
     // - 手柄线程有事件时 PostMessage(WAKE) 唤醒本线程（即时）
     // - WM_COPYDATA（UI 实时修改）SendMessage 进队 → MsgWait 立即唤醒
     // - 兜底 50ms 超时（消费 fg/其它通道）
+    info!("主消息循环启动: hwnd={:?}", state.hwnd);
+    let mut tick_counter: u32 = 0;
     loop {
         if pump_message_batch(&mut state, &quit_flag()) {
             break;
         }
         // 消费通道（前台事件）
         while let Ok(fg) = fg_rx.try_recv() {
+            info!("前台事件: {:?}", fg);
             handle_fg_event(&mut state, fg);
         }
         // 消费手柄事件（已由 WAKE 消息唤醒，此处仅清空残余）
         while let Ok(ev) = gamepad_rx.try_recv() {
+            info!("手柄事件: {:?}", ev);
             state.on_gamepad(ev);
         }
         // 阻塞等待：新消息 或 50ms 兜底
@@ -561,6 +572,10 @@ fn backend_process_main() {
                 windows::Win32::UI::WindowsAndMessaging::QS_ALLINPUT,
                 windows::Win32::UI::WindowsAndMessaging::MWMO_INPUTAVAILABLE,
             );
+        }
+        tick_counter = tick_counter.wrapping_add(1);
+        if tick_counter % 400 == 0 {
+            info!("心跳: 主循环存活");
         }
     }
 

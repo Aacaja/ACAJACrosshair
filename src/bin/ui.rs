@@ -18,12 +18,13 @@ use acaja::config::PresetStore;
 use acaja::ipc;
 
 fn init_logging() -> Option<PathBuf> {
-    if !cfg!(debug_assertions) {
-        return None; // 发行版不生成日志文件
+    let diag = std::env::args().any(|a| a == "--diag");
+    if !cfg!(debug_assertions) && !diag {
+        return None; // 发行版默认不生成日志；--diag 诊断模式例外
     }
     let dir = acaja::appdata_dir().ok()?;
     std::fs::create_dir_all(&dir).ok()?;
-    let log_path = dir.join("acaja-ui.log");
+    let log_path = dir.join(if diag { "acaja-ui-diag.log" } else { "acaja-ui.log" });
     let file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok()?;
     simplelog::WriteLogger::init(
         simplelog::LevelFilter::Info,
