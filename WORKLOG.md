@@ -4,6 +4,23 @@
 
 ---
 
+## [2026-08-28] v1.1.1：双二进制拆分 + MsgWait 事件驱动（常驻极致轻量化）
+
+总目标：用户明确「接受多线程/多进程，只要轻量化、低内存、低 CPU、发挥 Rust 优势」→ 常驻进一步压缩。
+
+状态：✅ 完成（v1.1.1 CI success；release 4 资产）
+
+干到哪了：
+- **双 bin 拆分**（Cargo.toml `[[bin]]`）：`acaja.exe` = 后台壳（链接裁剪 egui/eframe/glow → 2.8MB，v1.1.0 单 exe 双入口时后端仍带 egui 代码）；`acaja-ui.exe` = 设置进程（8.4MB）。`spawn_ui_process` 优先同目录 acaja-ui.exe。后端进程映射/驻留页大幅下降。
+- **MsgWaitForMultipleObjectsEx 事件驱动**：消息循环从「50ms 定时轮询」改「消息就绪即唤醒 + 50ms 兜底」；手柄线程事件到达时 PostMessage(WM_APP+66) 即时唤醒（HWND 跨线程传 isize 规避 Send 限制）；WM_COPYDATA（UI 实时改参）SendMessage 同步进队即刻唤醒 → UI 拖动滑块仍流畅；空闲时线程完全睡眠（CPU ≈ 0）。
+- **workflow 打包两个 exe**（ACAJA-vX + ACAJA-UI-vX）。
+- 验证证据：commit a20a753 → CI success；v1.1.1 release 4 资产（壳 2.8MB / UI 8.4MB）。
+
+预期成效：后台壳常驻内存 ~10-18MB（比 v1.1.0 再降），空闲 CPU ≈ 0%（手柄轮询除外 ~0.5%）；设置进程用完即走，内存峰值仅在打开时。
+
+下一步：用户实测数值。README 打包/架构说明已含双进程（补双 exe 说明可后续）。
+
+---
 ## [2026-08-28] v1.1.0：设置界面拆分为独立进程（双进程架构，内存对齐 RTSS 级别）
 
 总目标：用户要求「独立 UI 进程」成品——后台壳 ~15MB 常驻，设置界面按需拉起、关闭即彻底释放（~65MB）。
