@@ -54,9 +54,11 @@ pub fn paint_preview(ui: &mut Ui, rect: Rect, preset: &Preset) {
         return;
     };
 
-    let radius = rotation_safe_radius(&geom).max(1.0);
-    // 几何单位 → 屏幕像素
-    let scale = (rect.width().min(rect.height()) * 0.72) / (radius * 2.0);
+    let _radius = rotation_safe_radius(&geom).max(1.0);
+    // v1.1.5：固定比例缩放（消除「小尺寸被放大、大尺寸饱和」的非线性）。
+    // 以 size=200（最大有效状态）时的几何半径为基准，保证拖动大小始终线性；
+    // 预览区半宽 144px 对应几何半径 208px（≈ 实际比例 0.69x）。
+    let scale = (rect.width().min(rect.height()) * 0.72) / 208.0;
     let cx = rect.center().x;
     let cy = rect.center().y;
     let theta = preset.rotation.to_radians();

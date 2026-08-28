@@ -29,8 +29,10 @@ pub struct AcajaApp {
     last_send: std::time::Instant,
     /// 后端连接状态（找到主进程窗口则 true）
     backend_ok: bool,
-    /// 有未送达的修改（找不到后端时挂起，每秒重试）
+    /// 有未送达的修改（预留；推送模式仅按钮触发）
     pending_send: bool,
+    /// 最近一次「应用」时间（状态显示用）
+    last_apply_at: std::time::Instant,
     template_name: &'static str,
 
     /// 工作副本（界面直接编辑此预设）
@@ -115,6 +117,7 @@ impl AcajaApp {
             last_send: std::time::Instant::now(),
             backend_ok: false,
             pending_send: false,
+            last_apply_at: std::time::Instant::now(),
             template_name: "tpl_apex",
             preset,
             active_name,
@@ -258,11 +261,50 @@ impl AcajaApp {
             ui.label(RichText::new(t(self.lang, "close_quits")).size(10.5).weak());
         });
         ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new(t(self.lang, "push_apply")).strong()).clicked() {
+                // 1) 保存文件（主程序 0.5s 内自动检测应用；不依赖实时通道）
+                let (name, preset) = (self.active_name.clone(), self.preset.clone());
+                let store = self.store.clone();
+                let saved = {
+                    let mut st = store.lock().unwrap();
+                    let r = st.save_preset(&name, &preset);
+                    if r.is_ok() {
+                        let _ = st.save_app();
+                    }
+                    r.is_ok()
+                };
+                // 2) 尽力实时推送（通道可用则立即生效，不可用文件兜底）
+                let pushed = if let Some(hwnd) = crate::ipc::find_backend() {
+                    crate::ipc::send_json(hwnd, crate::ipc::IPC_TAG_PRESET, &crate::ipc::preset_payload(&self.preset, self.visible))
+                } else {
+                    false
+                };
+                self.backend_ok = pushed;
+                self.last_apply_at = std::time::Instant::now();
+                if saved {
+                    self.flash(if pushed {
+                        t(self.lang, "pushed_ok").to_string()
+                    } else {
+                        t(self.lang, "pushed_via_file").to_string()
+                    });
+                } else {
+                    self.flash(t(self.lang, "error").to_string());
+                }
+            }
+            if ui.button(t(self.lang, "quit_backend")).clicked() {
+                // 通过命令文件请求主程序退出（不依赖实时通道）
+                if let Some(appdata) = crate::appdata_dir().ok() {
+                    let _ = std::fs::write(appdata.join("cmd.json"), "{\"cmd\":\"quit\"}");
+                    self.flash(t(self.lang, "quit_backend_sent").to_string());
+                }
+            }
+        });
         // ---- 主程序连接状态 ----
         if self.backend_ok {
             ui.label(RichText::new(t(self.lang, "backend_connected")).size(10.5).color(Color32::from_rgb(48, 209, 88)));
         } else {
-            ui.label(RichText::new(t(self.lang, "backend_disconnected")).size(10.5).color(Color32::from_rgb(255, 150, 60)));
+            ui.label(RichText::new(t(self.lang, "backend_file_mode")).size(10.5).color(Color32::from_rgb(255, 150, 60)));
         }
 
         // 语言/主题变更持久化
@@ -846,14 +888,10 @@ impl eframe::App for AcajaApp {
                     });
             });
 
-        // ---- 帧末推送后端进程 ----
-        // v1.1.4：dirty（有修改）或 pending（上次未送达）都触发推送——
-        // 修复「UI 先开、主程序后开」时永不重试的 bug
-        if self.dirty || self.pending_send {
-            if self.dirty {
-                self.dirty = false;
-            }
-            self.send_to_backend();
+        // ---- 帧末：仅标记（v1.1.5 推送模式：不自动推，由「应用」按钮触发） ----
+        if self.dirty {
+            self.dirty = false;
+            // 预览之外的改动随时可推送（按钮更显式）
         }
     }
 

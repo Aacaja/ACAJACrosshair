@@ -51,6 +51,15 @@ struct MainState {
     last_version: u64,
     gamepad_cfg: Arc<RwLock<RuntimeGamepadCfg>>,
     fg_exe: String,
+    /// 配置文件监控（v1.1.5「推送按钮」模式：UI 修改文件 → 主进程自动应用）
+    watched: FileWatch,
+}
+
+/// 文件监控状态：app.json 与当前预设文件的修改时间
+struct FileWatch {
+    app_mtime: Option<std::time::SystemTime>,
+    preset_mtime: Option<std::time::SystemTime>,
+    preset_name: String,
 }
 
 impl MainState {
@@ -133,6 +142,78 @@ impl MainState {
         let preset = self.preset();
         self.overlay.update(preset, self.position_for_preset(), self.app.visible);
         info!("切换准星: visible={}", self.app.visible);
+    }
+
+    /// 监控配置文件变化（UI「应用」后自动重载，无需重启主程序）
+    fn check_config_files(&mut self) -> bool {
+        let appdata = match acaja::appdata_dir() {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let app_path = appdata.join("app.json");
+        let preset_path = appdata.join("presets").join(format!("{}.json", self.watched.preset_name));
+        let app_mtime = std::fs::metadata(&app_path).and_then(|m| m.modified()).ok();
+        let preset_mtime = std::fs::metadata(&preset_path).and_then(|m| m.modified()).ok();
+
+        // 预设名可能变了（app.json 的 last_preset）——先看 app.json
+        if app_mtime != self.watched.app_mtime {
+            self.watched.app_mtime = app_mtime;
+            let name = { self.store.lock().unwrap().active_name() };
+            if name != self.watched.preset_name {
+                self.watched.preset_name = name.clone();
+                info!("配置监控: 激活预设切换为 {name}");
+                // 重读 app.json 里的 last_preset 对应的预设文件（mtime 基线重置）
+                let p2 = appdata.join("presets").join(format!("{name}.json"));
+                self.watched.preset_mtime = std::fs::metadata(&p2).and_then(|m| m.modified()).ok();
+                self.reload_preset();
+                return true;
+            }
+        }
+        if preset_mtime != self.watched.preset_mtime {
+            self.watched.preset_mtime = preset_mtime;
+            if let Some(mt) = preset_mtime {
+                info!("配置监控: 预设文件已更新 ({:?})，重新应用", mt);
+                self.apply_preset_file(&preset_path);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 直接读取预设文件并应用到准星（不依赖 IPC）
+    fn apply_preset_file(&mut self, path: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Ok(preset) = serde_json::from_str::<acaja::config::Preset>(&text) else {
+            warn!("配置监控: 预设文件解析失败");
+            return;
+        };
+        let preset = Arc::new(preset);
+        {
+            let mut w = self.shared.write().unwrap();
+            w.preset = preset.clone();
+            w.version = w.version.wrapping_add(1);
+        }
+        self.last_version = { self.shared.read().unwrap().version };
+        self.apply_hotkeys();
+        self.sync_gamepad_cfg();
+        self.full_update();
+        info!("配置监控: 已应用新预设");
+    }
+
+    /// 命令文件（UI「退出主程序」）：返回 true = 应退出
+    fn check_command_file(&mut self) -> bool {
+        let Some(appdata) = acaja::appdata_dir().ok() else { return false };
+        let cmd_path = appdata.join("cmd.json");
+        if !cmd_path.exists() {
+            return false;
+        }
+        let text = std::fs::read_to_string(&cmd_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&cmd_path);
+        if text.contains("\"quit\"") || text.contains("quit") {
+            info!("收到退出命令（UI 请求）");
+            return true;
+        }
+        false
     }
 
     fn cycle_preset(&mut self) {
@@ -513,6 +594,7 @@ fn backend_process_main() {
     let gamepad_cfg: Arc<RwLock<RuntimeGamepadCfg>> =
         Arc::new(RwLock::new(RuntimeGamepadCfg::from_preset(&initial_preset)));
 
+    let active_name = { store.lock().unwrap().active_name() };
     let mut state = MainState {
         store,
         overlay: overlay.clone(),
@@ -523,6 +605,11 @@ fn backend_process_main() {
         last_version: 1,
         gamepad_cfg,
         fg_exe: String::new(),
+        watched: FileWatch {
+            app_mtime: None,
+            preset_mtime: None,
+            preset_name: active_name,
+        },
     };
 
     // ---- 托盘 ----
@@ -589,6 +676,13 @@ fn backend_process_main() {
             );
         }
         tick_counter = tick_counter.wrapping_add(1);
+        if tick_counter % 10 == 0 {
+            // 每 ~0.5s：配置监控（UI「应用」按钮的兜底通道）
+            if state.check_command_file() {
+                break;
+            }
+            let _ = state.check_config_files();
+        }
         if tick_counter % 400 == 0 {
             info!("心跳: 主循环存活");
         }
