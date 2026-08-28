@@ -4,6 +4,22 @@
 
 ---
 
+## [2026-08-28] v1.1.6：现代化 UI 重设计（导航化布局）+ 外部 UI 模型通道评估
+
+总目标：用户要求「重新设计 UI 更现代化」。尝试 glm-5.3（ui-designer agent）两次：Stream ended / Connection error——pi 的 subagent 模型流在该环境不可靠（模型调用不走用户 shell 代理，代理方案对模型链路无效；用户 shell 代理 env 已确认 127.0.0.1:7890）。判定：外部模型通道不可用，由主控自行完成设计。
+
+状态：✅ 完成（v1.1.6 CI success）
+
+干到哪了：
+- **布局重构**：品牌顶栏（几何 A 方块 + 标题版本 + 语言/主题）→ 左侧 7 项导航（几何状态点/强调条，无 emoji）→ 右侧卡片区（样式/动态/位置/手柄/快捷键/图片/预设 分区显示，Card = 圆角 10 + 分层底色）→ 底部固定操作条（连接状态 +「应用设置到主程序」主按钮 +「退出主程序」）。
+- **深色分层主题**：自定义 Visuals（BG #14161c / CARD #1f232d / 边框 #2a2f3a / accent #0a84ff soft #102e52）；文字色 #e5e7ed；次要文本 #8a90a0。
+- **保留全部逻辑**：预设 CRUD/模板/热键/手柄（ADS 四模式+LB/RB）/右键三模式/推送按钮/退出命令/dirty 标记/退出自动保存。
+- 踩坑：egui 0.30 `hline(x: Rangef, y, stroke)` 3 参（写错 4 参）；`painter.rect_filled` 等 OK；Nav 中 `preset.dirty` 笔误。
+- 验证证据：commit 5b305fd → CI success（45+ 单测）；v1.1.6 release assets=5（acaja.exe/acaja-ui.exe/zip/README×2）。
+
+下一步：实测新 UI；Cargo version 同步 1.1.6 重打 tag（zip 名修正）。
+
+---
 ## [2026-08-28] v1.1.1：双二进制拆分 + MsgWait 事件驱动（常驻极致轻量化）
 
 总目标：用户明确「接受多线程/多进程，只要轻量化、低内存、低 CPU、发挥 Rust 优势」→ 常驻进一步压缩。

@@ -23,13 +23,23 @@ use crate::ui::strings::{ads_mode_name, shape_name, t};
 
 const ACCENT: Color32 = Color32::from_rgb(10, 132, 255);
 const ACCENT_SOFT: Color32 = Color32::from_rgb(16, 46, 82);
+const ACCENT_BRIGHT: Color32 = Color32::from_rgb(77, 154, 255);
 const CARD_BG: Color32 = Color32::from_rgb(31, 35, 45);
 const CARD_BG_HOVER: Color32 = Color32::from_rgb(37, 42, 54);
 const BG: Color32 = Color32::from_rgb(20, 22, 28);
 const BORDER: Color32 = Color32::from_rgb(42, 47, 58);
+const HAIRLINE: Color32 = Color32::from_rgb(38, 43, 53);
 const TEXT_DIM: Color32 = Color32::from_rgb(138, 144, 160);
+const LABEL_FG: Color32 = Color32::from_rgb(178, 184, 197);
+const NAV_FG: Color32 = Color32::from_rgb(168, 175, 190);
+const NAV_FG_HOVER: Color32 = Color32::from_rgb(222, 228, 238);
+const NAV_FG_ACTIVE: Color32 = Color32::from_rgb(242, 245, 251);
+const INPUT_BG: Color32 = Color32::from_rgb(24, 27, 35);
+const SWATCH_RING: Color32 = Color32::from_rgb(58, 64, 78);
 const OK: Color32 = Color32::from_rgb(48, 209, 88);
 const WARN: Color32 = Color32::from_rgb(255, 159, 10);
+/// 行标签列宽（滑杆 / 下拉 / 色块行的左列统一对齐）
+const LABEL_W: f32 = 110.0;
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_millis(1800);
 
 /// 导航 section 索引
@@ -136,14 +146,25 @@ impl AcajaApp {
         visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
         visuals.widgets.noninteractive.bg_fill = CARD_BG;
         visuals.widgets.noninteractive.weak_bg_fill = CARD_BG;
-        visuals.widgets.inactive.bg_fill = CARD_BG;
-        visuals.widgets.inactive.weak_bg_fill = CARD_BG;
+        // 弱底色（按钮 / 输入框 / 滑杆槽）：比卡片略深一档 → 内嵌层次
+        visuals.widgets.inactive.bg_fill = INPUT_BG;
+        visuals.widgets.inactive.weak_bg_fill = INPUT_BG;
         visuals.widgets.hovered.bg_fill = CARD_BG_HOVER;
         visuals.widgets.hovered.weak_bg_fill = CARD_BG_HOVER;
         visuals.widgets.active.bg_fill = ACCENT_SOFT;
+        visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
+        // 控件描边 + 圆角统一（按钮 / 下拉 / 勾选框 / 滑杆把手）
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, BORDER);
         visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, BORDER);
         visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, ACCENT);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT_BRIGHT);
+        let wround = Rounding::same(6.0);
+        visuals.widgets.noninteractive.rounding = wround;
+        visuals.widgets.inactive.rounding = wround;
+        visuals.widgets.hovered.rounding = wround;
+        visuals.widgets.active.rounding = wround;
+        visuals.widgets.open.rounding = wround;
         cc.egui_ctx.set_visuals(visuals);
 
         let mut app = AcajaApp {
@@ -264,6 +285,12 @@ impl AcajaApp {
             // 品牌方块
             let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, Rounding::same(6.0), ACCENT);
+            // 品牌方块：ACCENT 实底 + 亮色描边环
+            ui.painter().rect_stroke(
+                rect,
+                Rounding::same(6.0),
+                egui::Stroke::new(1.0, ACCENT_BRIGHT),
+            );
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -271,10 +298,13 @@ impl AcajaApp {
                 egui::FontId::proportional(14.0),
                 Color32::WHITE,
             );
+            ui.add_space(4.0);
+            ui.label(RichText::new(t(self.lang, "title")).size(19.0).strong());
+            ui.add_space(5.0);
             ui.label(
-                RichText::new(format!("{}  v{}", t(self.lang, "title"), crate::VERSION))
-                    .size(19.0)
-                    .strong(),
+                RichText::new(format!("v{}", crate::VERSION))
+                    .size(11.0)
+                    .color(TEXT_DIM),
             );
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                 // 主题
@@ -322,82 +352,94 @@ impl AcajaApp {
         }
     }
 
-    /// 左侧导航（几何状态点 + 文字，选中 = 强调条 + 底色）
+    /// 左侧导航（几何状态点 + 文字，选中 = 强调条 + 底色；整行可点）
     fn nav_ui(&mut self, ui: &mut Ui) {
         let items: [(usize, &str); 7] = [
             (SEC_STYLE, "shape_style"),
             (SEC_DYNAMIC, "dynamic"),
             (SEC_POSITION, "position"),
-            (SEC_GAMEPAD, "gamepad"),
+            (SEC_GAMEPAD, "nav_gamepad"),
             (SEC_HOTKEY, "hotkey"),
-            (SEC_IMAGE, "custom_image"),
+            (SEC_IMAGE, "nav_image"),
             (SEC_PRESETS, "presets"),
         ];
         for (idx, key) in items {
             let selected = self.active_section == idx;
-            let resp = ui.selectable_label(selected, RichText::new(t(self.lang, key)).size(13.0));
-            let rect = resp.rect;
+            // 整行分配可点击区域：先画背景，再画点与文字（保证遮挡层级正确）
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
+            let painter = ui.painter();
             if selected {
-                // 选中：左侧强调条 + 底色
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(rect.min - egui::vec2(2.0, 2.0), rect.max + egui::vec2(2.0, 2.0)),
-                    Rounding::same(6.0),
-                    ACCENT_SOFT,
-                );
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_size(
-                        egui::pos2(rect.left() + 6.0, rect.center().y - 2.5),
-                        egui::vec2(5.0, 5.0),
-                    ),
-                    Rounding::same(2.5),
-                    ACCENT,
-                );
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_size(
-                        egui::pos2(rect.left() + 15.0, rect.center().y - 9.0),
-                        egui::vec2(3.0, 18.0),
+                // 选中：底色 + 左侧强调条
+                painter.rect_filled(rect, Rounding::same(7.0), ACCENT_SOFT);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(rect.left() + 5.0, rect.center().y - 9.0),
+                        egui::pos2(rect.left() + 8.0, rect.center().y + 9.0),
                     ),
                     Rounding::same(1.5),
                     ACCENT,
                 );
-            } else {
-                // 未选中：灰色小圆点 + hover 底色
-                ui.painter().circle_filled(
-                    egui::pos2(rect.left() + 8.5, rect.center().y),
-                    2.5,
-                    BORDER,
+            } else if resp.hovered() {
+                // 悬停：轻微提亮
+                painter.rect_filled(
+                    rect,
+                    Rounding::same(7.0),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 7),
                 );
-                if resp.hovered() {
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_max(rect.min - egui::vec2(2.0, 2.0), rect.max + egui::vec2(2.0, 2.0)),
-                        Rounding::same(6.0),
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 8),
-                    );
-                }
+            }
+            // 几何状态点
+            if selected {
+                painter
+                    .circle_filled(egui::pos2(rect.left() + 15.0, rect.center()), 3.0, ACCENT);
+            } else {
+                painter.circle_filled(
+                    egui::pos2(rect.left() + 15.5, rect.center()),
+                    2.5,
+                    Color32::from_rgb(92, 99, 114),
+                );
+            }
+            // 文字
+            let fg = if selected {
+                NAV_FG_ACTIVE
+            } else if resp.hovered() {
+                NAV_FG_HOVER
+            } else {
+                NAV_FG
+            };
+            painter.text(
+                egui::pos2(rect.left() + 27.0, rect.center()),
+                egui::Align2::LEFT_CENTER,
+                t(self.lang, key),
+                egui::FontId::proportional(12.5),
+                fg,
+            );
+            if resp.hovered() {
+                ui.ctx()
+                    .output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
             }
             if resp.clicked() {
                 self.active_section = idx;
             }
-            ui.add_space(2.0);
         }
     }
 
-    /// 底部操作条：连接状态 + 应用 / 退出主程序
+    /// 底部操作条：连接状态 + 应用 / 退出主程序（贴底卡片）
     fn bottom_bar(&mut self, ui: &mut Ui) {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 44.0),
-            egui::Sense::hover(),
+        // 无视当前光标，直接占据面板底部区域，避免与导航/内容重叠
+        let max = ui.max_rect();
+        let h = 48.0;
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(max.left(), max.bottom() - h),
+            egui::pos2(max.right(), max.bottom()),
         );
+        let _ = ui.allocate_rect(rect, egui::Sense::hover());
         let painter = ui.painter();
-        // 卡片底色 + 上边框
+        // 卡片底色 + 细边框（与内容卡片同一视觉语言）
         painter.rect_filled(rect, Rounding::same(10.0), CARD_BG);
-        painter.hline(
-            Rangef::new(rect.left() + 12.0, rect.right() - 12.0),
-            rect.top() + 12.0,
-            egui::Stroke::new(1.0, BORDER),
-        );
+        painter.rect_stroke(rect, Rounding::same(10.0), egui::Stroke::new(1.0, BORDER));
 
-        let inner = rect.shrink2(egui::vec2(12.0, 8.0));
+        let inner = rect.shrink2(egui::vec2(14.0, 8.0));
         let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(Align::Center)));
         bar_ui.set_clip_rect(inner);
         // 状态文字
@@ -421,8 +463,12 @@ impl AcajaApp {
             ui.add_space(4.0);
             if ui
                 .add(
-                    egui::Button::new(RichText::new(t(self.lang, "quit_backend")).size(12.5))
-                        .min_size(egui::vec2(96.0, 28.0)),
+                    egui::Button::new(
+                        RichText::new(t(self.lang, "quit_backend"))
+                            .size(12.5)
+                            .color(TEXT_DIM),
+                    )
+                    .min_size(egui::vec2(96.0, 28.0)),
                 )
                 .clicked()
             {
@@ -432,34 +478,52 @@ impl AcajaApp {
                 }
             }
             ui.add_space(6.0);
-            if ui
-                .add(
-                    egui::Button::new(RichText::new(t(self.lang, "push_apply")).size(13.5).strong())
-                        .fill(ACCENT)
-                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(60, 140, 255)))
-                        .min_size(egui::vec2(150.0, 30.0)),
-                )
-                .clicked()
-            {
+            // 主按钮：ACCENT 实底 + 亮色边框，顶部内高光 / 底部内阴影营造渐变质感
+            let apply = ui.add(
+                egui::Button::new(RichText::new(t(self.lang, "push_apply")).size(13.5).strong())
+                    .fill(ACCENT)
+                    .stroke(egui::Stroke::new(1.0, ACCENT_BRIGHT))
+                    .min_size(egui::vec2(150.0, 30.0)),
+            );
+            let br = apply.rect;
+            let hl = if apply.hovered() {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 90)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 52)
+            };
+            ui.painter().hline(
+                Rangef::new(br.left() + 5.0, br.right() - 5.0),
+                br.top() + 1.5,
+                egui::Stroke::new(1.0, hl),
+            );
+            ui.painter().hline(
+                Rangef::new(br.left() + 5.0, br.right() - 5.0),
+                br.bottom() - 1.5,
+                egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(2, 32, 72, 110)),
+            );
+            if apply.clicked() {
                 self.push_to_backend();
             }
         });
     }
 
-    /// 卡片容器
+    /// 卡片容器（统一：圆角 10 / 内边距 14 / 1px 细边框 / 行距节奏）
     fn card(ui: &mut Ui, title: Option<&str>, add_contents: impl FnOnce(&mut Ui)) {
         let frame = egui::Frame::none()
             .fill(CARD_BG)
             .rounding(Rounding::same(10.0))
+            .stroke(egui::Stroke::new(1.0, BORDER))
             .inner_margin(Margin::same(14.0));
         frame.show(ui, |ui| {
+            // 行距节奏统一：行间 9px
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 9.0);
             if let Some(t) = title {
-                ui.label(RichText::new(t).size(13.5).strong().color(ACCENT));
-                ui.add_space(8.0);
+                ui.label(RichText::new(t).size(14.0).strong().color(ACCENT));
+                ui.add_space(4.0);
             }
             add_contents(ui);
         });
-        ui.add_space(8.0);
+        ui.add_space(10.0);
     }
 
     // ================================================================
