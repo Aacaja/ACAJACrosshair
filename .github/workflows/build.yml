@@ -42,8 +42,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target\release\acaja.exe "dist\ACAJA-v$version-x64.exe" -ErrorAction Stop
-          Copy-Item target\release\acaja-ui.exe "dist\ACAJA-UI-v$version-x64.exe" -ErrorAction Stop
+          # 保持程序内部搜索名一致（acaja.exe / acaja-ui.exe），版本号进 zip 名
+          Copy-Item target\release\acaja.exe "dist\acaja.exe" -ErrorAction Stop
+          Copy-Item target\release\acaja-ui.exe "dist\acaja-ui.exe" -ErrorAction Stop
+          Compress-Archive -Path dist\* -DestinationPath "dist\ACAJA-v$version-x64.zip" -Force
           Copy-Item README.md, README_CN.md -Destination dist -ErrorAction SilentlyContinue
           Get-ChildItem dist
 

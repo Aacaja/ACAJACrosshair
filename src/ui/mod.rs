@@ -847,8 +847,12 @@ impl eframe::App for AcajaApp {
             });
 
         // ---- 帧末推送后端进程 ----
-        if self.dirty {
-            self.dirty = false;
+        // v1.1.4：dirty（有修改）或 pending（上次未送达）都触发推送——
+        // 修复「UI 先开、主程序后开」时永不重试的 bug
+        if self.dirty || self.pending_send {
+            if self.dirty {
+                self.dirty = false;
+            }
             self.send_to_backend();
         }
     }

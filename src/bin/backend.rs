@@ -252,13 +252,28 @@ fn create_message_window() -> HWND {
 }
 
 /// 拉起设置 UI 进程（独立二进制 acaja-ui.exe；单例由 UI 进程自身互斥体保证）。
-/// v1.1.2：绝对路径候选（exe 同目录 → 工作目录），全部失败给出明确提示。
+/// v1.1.4：文件名通配兼容——同目录下任何以 "acaja-ui" 开头的 .exe 都可以
+/// （用户重命名如 ACAJA-UI-v1.1.4-x64.exe 也能自动找到）。
 fn spawn_ui_process() {
     use std::path::{Path, PathBuf};
-    // 候选：exe 同目录（最常见）→ 影响工作目录 → 相对名
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
     let mut candidates: Vec<PathBuf> = Vec::new();
+    // 1) 同目录扫描通配
     if let Some(dir) = &exe_dir {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut hits: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().map(|x| x.to_string_lossy().to_ascii_lowercase()) == Some("exe".into())
+                        && p.file_stem()
+                            .map(|s| s.to_string_lossy().to_ascii_lowercase().starts_with("acaja-ui"))
+                            .unwrap_or(false)
+                })
+                .collect();
+            hits.sort();
+            candidates.extend(hits);
+        }
         candidates.push(dir.join("acaja-ui.exe"));
     }
     candidates.push(PathBuf::from("acaja-ui.exe"));
