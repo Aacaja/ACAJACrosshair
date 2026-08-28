@@ -1,6 +1,14 @@
+[[bin]]
+name = "acaja"
+path = "src/bin/backend.rs"
+
+[[bin]]
+name = "acaja-ui"
+path = "src/bin/ui.rs"
+
 [package]
 name = "acaja"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "ACAJA - Windows crosshair overlay tool"
 authors = ["Aacaja"]

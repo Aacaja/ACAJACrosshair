@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, select, unbounded};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use log::{info, warn};
 use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, ERROR_ALREADY_EXISTS, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
@@ -249,13 +249,20 @@ fn create_message_window() -> HWND {
     }
 }
 
-/// 拉起设置 UI 进程（单例由 UI 进程自身互斥体保证）
+/// 拉起设置 UI 进程（独立二进制 acaja-ui.exe；单例由 UI 进程自身互斥体保证）
 fn spawn_ui_process() {
-    if let Ok(exe) = std::env::current_exe() {
-        match std::process::Command::new(exe).arg("--ui").spawn() {
-            Ok(_) => info!("设置进程已拉起"),
-            Err(e) => warn!("设置进程拉起失败: {e}"),
-        }
+    use std::path::PathBuf;
+    // 优先：同目录 acaja-ui.exe（双 exe 拆分，后端免链接 egui）
+    let exe = std::env::current_exe().ok();
+    let ui_exe = exe
+        .as_ref()
+        .map(|p| p.parent().map(|d| d.join("acaja-ui.exe")))
+        .flatten()
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("acaja-ui.exe"));
+    match std::process::Command::new(&ui_exe).spawn() {
+        Ok(_) => info!("设置进程已拉起: {}", ui_exe.display()),
+        Err(e) => warn!("设置进程拉起失败（{}）: {e}", ui_exe.display()),
     }
 }
 
@@ -499,7 +506,7 @@ fn backend_process_main() {
         warn!("Raw Input 注册失败: {e}");
     }
 
-    let _gamepad_watcher = start_gamepad(state.gamepad_cfg.clone());
+    let _gamepad_watcher = start_gamepad(state.gamepad_cfg.clone(), Some(state.hwnd));
     let gamepad_rx = _gamepad_watcher.events.clone();
 
     // 初始显示 + 拉起设置进程（沿用「双击即见设置窗」的体验）
@@ -507,25 +514,30 @@ fn backend_process_main() {
     spawn_ui_process();
     info!("后台壳就绪");
 
-    // ---- 事件驱动主循环 ----
+    // ---- 事件驱动主循环（v1.1.1：消息就绪即唤醒，空闲完全睡眠） ----
+    // - 手柄线程有事件时 PostMessage(WAKE) 唤醒本线程（即时）
+    // - WM_COPYDATA（UI 实时修改）SendMessage 进队 → MsgWait 立即唤醒
+    // - 兜底 50ms 超时（消费 fg/其它通道）
     loop {
-        let tick = crossbeam_channel::after(Duration::from_millis(50));
-        select! {
-            recv(gamepad_rx) -> ev => {
-                if let Ok(ev) = ev {
-                    state.on_gamepad(ev);
-                }
-            }
-            recv(fg_rx) -> fg => {
-                if let Ok(fg) = fg {
-                    handle_fg_event(&mut state, fg);
-                }
-            }
-            recv(tick) -> _ => {
-                if pump_message_batch(&mut state, &quit_flag()) {
-                    break;
-                }
-            }
+        if pump_message_batch(&mut state, &quit_flag()) {
+            break;
+        }
+        // 消费通道（前台事件）
+        while let Ok(fg) = fg_rx.try_recv() {
+            handle_fg_event(&mut state, fg);
+        }
+        // 消费手柄事件（已由 WAKE 消息唤醒，此处仅清空残余）
+        while let Ok(ev) = gamepad_rx.try_recv() {
+            state.on_gamepad(ev);
+        }
+        // 阻塞等待：新消息 或 50ms 兜底
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(
+                None,
+                50,
+                windows::Win32::UI::WindowsAndMessaging::QS_ALLINPUT,
+                windows::Win32::UI::WindowsAndMessaging::MWMO_INPUTAVAILABLE,
+            );
         }
     }
 
@@ -548,63 +560,9 @@ fn quit_flag() -> Arc<AtomicBool> {
 }
 
 // ===========================================================================
-// 设置 UI 进程
-// ===========================================================================
-
-fn ui_process_main() {
-    init_logging();
-    info!("ACAJA 设置进程启动");
-
-    // 设置进程单例
-    let mutex: HANDLE =
-        unsafe { CreateMutexW(None, false, w!("Local\\ACAJACrosshairSettings")) }
-            .unwrap_or_default();
-    let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-    if already_running {
-        warn!("设置进程已在运行");
-        return;
-    }
-    std::mem::forget(mutex);
-
-    // 主进程自检：主进程消失（退出/崩溃）→ 设置进程兜底退出
-    std::thread::spawn(|| loop {
-        std::thread::sleep(Duration::from_secs(2));
-        if ipc::find_backend().is_none() {
-            std::process::exit(0);
-        }
-    });
-
-    let appdata = match acaja::appdata_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            warn!("无法获取 APPDATA: {e}");
-            return;
-        }
-    };
-    let store = match PresetStore::open(&appdata) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("配置仓库打开失败: {e}");
-            return;
-        }
-    };
-    let store = Arc::new(Mutex::new(store));
-
-    match acaja::ui::run(store, "ACAJA") {
-        Ok(()) => info!("设置进程正常退出"),
-        Err(e) => warn!("设置进程异常: {e}"),
-    }
-}
-
-// ===========================================================================
 // 入口
 // ===========================================================================
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--ui") {
-        ui_process_main();
-    } else {
-        backend_process_main();
-    }
+    backend_process_main();
 }

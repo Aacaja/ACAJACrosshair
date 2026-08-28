@@ -8,6 +8,9 @@
 
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock};
 
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::Foundation::HWND;
+
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use log::{info, warn};
 
@@ -104,9 +107,16 @@ impl RuntimeGamepadCfg {
     }
 }
 
+/// 事件到达时唤醒主消息线程的窗口消息（WM_APP+66）
+pub const WAKE_MSG: u32 = 0x8000 + 66;
+
 /// 启动手柄轮询线程。配置经 `Arc<RwLock<RuntimeGamepadCfg>>` 动态读取（UI 改动即时生效）。
 /// 轮询 8ms（125Hz）：CPU 占用约 0.5% 单核，ADS 延迟 <8ms 不可感知。
-pub fn start_gamepad(cfg: Arc<RwLock<RuntimeGamepadCfg>>) -> GamepadWatcher {
+/// 有事件时向 `wake_hwnd` 投递 WAKE_MSG（主线程改用 MsgWait 后由它实时唤醒）。
+pub fn start_gamepad(
+    cfg: Arc<RwLock<RuntimeGamepadCfg>>,
+    wake_hwnd: Option<windows::Win32::Foundation::HWND>,
+) -> GamepadWatcher {
     let (tx, rx): (Sender<GameEvent>, Receiver<GameEvent>) = unbounded();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
@@ -143,10 +153,12 @@ pub fn start_gamepad(cfg: Arc<RwLock<RuntimeGamepadCfg>>) -> GamepadWatcher {
                     if ads != prev_ads {
                         prev_ads = ads;
                         let _ = tx.send(GameEvent::Ads(ads));
+                        wake(wake_hwnd);
                     }
                     if fire != prev_fire {
                         prev_fire = fire;
                         let _ = tx.send(GameEvent::Fire(fire));
+                        wake(wake_hwnd);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(8));
                 } else if r == ERROR_DEVICE_NOT_CONNECTED {
@@ -166,6 +178,13 @@ pub fn start_gamepad(cfg: Arc<RwLock<RuntimeGamepadCfg>>) -> GamepadWatcher {
         .expect("spawn gamepad thread");
 
     GamepadWatcher { events: rx, stop }
+}
+
+/// 向主消息窗口投递唤醒消息（异步，极轻）
+fn wake(hwnd: Option<HWND>) {
+    if let Some(h) = hwnd {
+        let _ = unsafe { PostMessageW(h, WAKE_MSG, windows::Win32::Foundation::WPARAM(0), windows::Win32::Foundation::LPARAM(0)) };
+    }
 }
 
 #[cfg(test)]
