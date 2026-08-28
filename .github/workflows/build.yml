@@ -43,6 +43,7 @@ jobs:
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target\release\acaja.exe "dist\ACAJA-v$version-x64.exe" -ErrorAction Stop
+          Copy-Item target\release\acaja-ui.exe "dist\ACAJA-UI-v$version-x64.exe" -ErrorAction Stop
           Copy-Item README.md, README_CN.md -Destination dist -ErrorAction SilentlyContinue
           Get-ChildItem dist
 
