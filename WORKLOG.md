@@ -4,6 +4,22 @@
 
 ---
 
+## [2026-08-28] v1.0.11：后台=真隐藏（任务栏干净）+ 托盘右键修复 + 右键切换/开火真正接线
+
+总目标：① 后台运行不再留任务栏标签（最小化被否）② 托盘右键菜单无反应 ③ 鼠标右键点击/长按隐藏准星功能“缺失”（实际是功能从未接线）④ 内存进一步优化给出路径。
+
+状态：✅ 完成（v1.0.11 CI success，release 已发）
+
+干到哪了：
+- **根因复盘**：v1.0.10 最小化版被用户否掉（任务栏有标签）；恢复「真隐藏」（Visible(false)）+ **UI_HIDDEN 自有标志压制渲染 ≤1fps**（隐藏期每帧 request_repaint_after(1s) → 渲染频率 ≤1fps，从根源杜绝 v1.0.8 的 6% 空转；egui 0.30 的 ViewportInfo.visible 通过 ctx.input 不可得，改用自有 AtomicBool 更稳）。
+- **托盘右键菜单修复**：Shell_NotifyIcon 日常回调是 WM_RBUTTONUP(0x205) 而非 WM_CONTEXTMENU → 补上（两者都处理）。这是“点右键没反应”的根因。
+- **右键切换/左键开火功能接线**：pump_message_batch 消息泵长期遗漏 WM_INPUT 分支——Raw Input 只在启动时注册，事件从未消费。补上：RightDown/Up → on_right_button（点击切换/按住显示/按住隐藏三模式即刻可用）；LeftDown → fire_started（开火扩散）。
+- 踩坑：ViewportInfo.visible 字段在 eframe/egui 0.30 间接访问失败（input().viewport() 不可见字段），改自有标志；main.rs import 两次部分替换遗漏。
+- 验证证据：commit 104bd34 → CI success；v1.0.11 release assets=3。
+
+下一步：用户实测（后台=任务栏无标签+CPU 低；托盘右键弹菜单；右键点击/长按隐藏）。内存：egui 框架常驻 ~65MB 是结构性成本（对比 RTSS 属原生 C++ 无 UI 框架）；v1.1 若做「UI 独立进程」（后台彻底卸载 UI，内存落 ~15MB）可对齐 RTSS，待用户确认是否值得投入。
+
+---
 ## [2026-08-28] v1.0.10：后台运行改为最小化（v1.0.9 关窗卡死、v1.0.8 隐藏 6% 的终结方案）
 
 总目标：找一个「后台模式」的稳定低占实现。实证：隐藏窗口（Visible(false)）→ 失去 vsync 节流 → 渲染空转 6%（v1.0.8）；真正 Close → eframe 清理流程在某环境卡死（v1.0.9 用户实测强制退出）。
