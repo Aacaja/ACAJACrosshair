@@ -279,7 +279,7 @@ fn handle_fg_event(state: &mut MainState, fg: FgEvent) {
 }
 
 /// 消息泵批处理（托盘/热键/退出信号）；返回 true = 应退出消息线程
-fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>, reopen: &Arc<AtomicBool>) -> bool {
+fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
     let mut exit_now = false;
     unsafe {
         let mut msg = MSG::default();
@@ -323,10 +323,8 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>, reopen: &Ar
                         match cmd {
                             Some(CMD_TOGGLE) => state.toggle_visible(),
                             Some(CMD_SETTINGS) => {
-                                if !acaja::ui::show_settings_window() {
-                                    // UI 已关闭（后台运行模式）→ 要求主线程重建设置窗
-                                    reopen.store(true, Ordering::SeqCst);
-                                }
+                                // 后台（最小化）时还原设置窗
+                                let _ = acaja::ui::show_settings_window();
                             }
                             Some(CMD_QUIT) => {
                                 info!("托盘退出");
@@ -357,7 +355,6 @@ fn msg_thread_main(
     overlay: OverlayHandle,
     stop: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
-    reopen: Arc<AtomicBool>,
     shared: Arc<RwLock<SharedPreset>>,
     gamepad_cfg: Arc<RwLock<acaja::input::gamepad::RuntimeGamepadCfg>>,
 ) {
@@ -434,7 +431,7 @@ fn msg_thread_main(
                     break;
                 }
                 state.sync_from_ui(&gamepad_cfg);
-                if pump_message_batch(&mut state, &quit, &reopen) {
+                if pump_message_batch(&mut state, &quit) {
                     break;
                 }
             }
@@ -557,7 +554,6 @@ fn main() {
     // ---- 消息线程（Win32 事件） ----
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false)); // UI 不可用时的全局退出信号（托盘触发）
-    let reopen = Arc::new(AtomicBool::new(false)); // 后台运行模式中要求重建设置窗
     let msg_thread = std::thread::Builder::new()
         .name("acaja-msg".into())
         .spawn({
@@ -567,8 +563,7 @@ fn main() {
             let quit = quit.clone();
             let shared = shared.clone();
             let gamepad_cfg = gamepad_cfg.clone();
-            let reopen = reopen.clone();
-            move || msg_thread_main(store, overlay, stop, quit, reopen, shared, gamepad_cfg)
+            move || msg_thread_main(store, overlay, stop, quit, shared, gamepad_cfg)
         })
         .expect("spawn msg thread");
 
@@ -599,22 +594,8 @@ fn main() {
             }
         }
 
-        // 后台运行模式：窗口真正关闭，UI 资源全部释放；等待托盘指令
-        if acaja::ui::BACKGROUND_REQUESTED.swap(false, Ordering::SeqCst) {
-            info!("后台运行模式：设置窗已关闭（资源释放），等待托盘指令");
-            loop {
-                std::thread::sleep(Duration::from_millis(100));
-                if quit.load(Ordering::SeqCst) {
-                    break 'ui_loop;
-                }
-                if reopen.load(Ordering::SeqCst) {
-                    reopen.store(false, Ordering::SeqCst);
-                    info!("托盘要求重建设置窗口");
-                    continue 'ui_loop;
-                }
-            }
-        }
-        // X 关闭 → 彻底退出
+        // X 关闭 → 自动保存（on_exit 完成）并彻底退出
+        info!("设置窗口已关闭，程序退出");
         break 'ui_loop;
     }
 
