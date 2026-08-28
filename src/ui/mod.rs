@@ -391,10 +391,10 @@ impl AcajaApp {
             // 几何状态点
             if selected {
                 painter
-                    .circle_filled(egui::pos2(rect.left() + 15.0, rect.center()), 3.0, ACCENT);
+                    .circle_filled(egui::pos2(rect.left() + 15.0, rect.center().y), 3.0, ACCENT);
             } else {
                 painter.circle_filled(
-                    egui::pos2(rect.left() + 15.5, rect.center()),
+                    egui::pos2(rect.left() + 15.5, rect.center().y),
                     2.5,
                     Color32::from_rgb(92, 99, 114),
                 );
@@ -408,7 +408,7 @@ impl AcajaApp {
                 NAV_FG
             };
             painter.text(
-                egui::pos2(rect.left() + 27.0, rect.center()),
+                egui::pos2(rect.left() + 27.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 t(self.lang, key),
                 egui::FontId::proportional(12.5),
