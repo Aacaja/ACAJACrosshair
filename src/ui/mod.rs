@@ -12,7 +12,7 @@ pub mod strings;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use egui::{Align, Color32, ComboBox, Context, Margin, RichText, Rounding, TextEdit, Ui, Visuals};
+use egui::{Align, Color32, ComboBox, Context, Margin, Rangef, RichText, Rounding, TextEdit, Ui, Visuals};
 use log::{info, warn};
 
 use crate::config::{
@@ -322,24 +322,23 @@ impl AcajaApp {
         }
     }
 
-    /// 左侧图标导航
+    /// 左侧导航（几何状态点 + 文字，选中 = 强调条 + 底色）
     fn nav_ui(&mut self, ui: &mut Ui) {
-        let items: [(usize, &str, &str); 7] = [
-            (SEC_STYLE, "🎯", "shape_style"),
-            (SEC_DYNAMIC, "⚡", "dynamic"),
-            (SEC_POSITION, "📍", "position"),
-            (SEC_GAMEPAD, "🎮", "gamepad"),
-            (SEC_HOTKEY, "⌨️", "hotkey"),
-            (SEC_IMAGE, "🖼️", "custom_image"),
-            (SEC_PRESETS, "📁", "presets"),
+        let items: [(usize, &str); 7] = [
+            (SEC_STYLE, "shape_style"),
+            (SEC_DYNAMIC, "dynamic"),
+            (SEC_POSITION, "position"),
+            (SEC_GAMEPAD, "gamepad"),
+            (SEC_HOTKEY, "hotkey"),
+            (SEC_IMAGE, "custom_image"),
+            (SEC_PRESETS, "presets"),
         ];
-        for (idx, icon, key) in items {
+        for (idx, key) in items {
             let selected = self.active_section == idx;
-            let text = format!("{icon}  {}", t(self.lang, key));
-            let resp = ui.selectable_label(selected, RichText::new(text).size(13.0));
+            let resp = ui.selectable_label(selected, RichText::new(t(self.lang, key)).size(13.0));
             let rect = resp.rect;
             if selected {
-                // 左侧强调条 + 底色
+                // 选中：左侧强调条 + 底色
                 ui.painter().rect_filled(
                     egui::Rect::from_min_max(rect.min - egui::vec2(2.0, 2.0), rect.max + egui::vec2(2.0, 2.0)),
                     Rounding::same(6.0),
@@ -347,19 +346,34 @@ impl AcajaApp {
                 );
                 ui.painter().rect_filled(
                     egui::Rect::from_min_size(
-                        rect.min + egui::vec2(2.0, 4.0),
-                        egui::vec2(3.0, rect.height() - 8.0),
+                        egui::pos2(rect.left() + 6.0, rect.center().y - 2.5),
+                        egui::vec2(5.0, 5.0),
+                    ),
+                    Rounding::same(2.5),
+                    ACCENT,
+                );
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + 15.0, rect.center().y - 9.0),
+                        egui::vec2(3.0, 18.0),
                     ),
                     Rounding::same(1.5),
                     ACCENT,
                 );
-            }
-            if resp.hovered() && !selected {
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(rect.min - egui::vec2(2.0, 2.0), rect.max + egui::vec2(2.0, 2.0)),
-                    Rounding::same(6.0),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 8),
+            } else {
+                // 未选中：灰色小圆点 + hover 底色
+                ui.painter().circle_filled(
+                    egui::pos2(rect.left() + 8.5, rect.center().y),
+                    2.5,
+                    BORDER,
                 );
+                if resp.hovered() {
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(rect.min - egui::vec2(2.0, 2.0), rect.max + egui::vec2(2.0, 2.0)),
+                        Rounding::same(6.0),
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 8),
+                    );
+                }
             }
             if resp.clicked() {
                 self.active_section = idx;
@@ -377,14 +391,18 @@ impl AcajaApp {
         let painter = ui.painter();
         // 卡片底色 + 上边框
         painter.rect_filled(rect, Rounding::same(10.0), CARD_BG);
-        painter.hline(rect.left() + 12.0, rect.right() - 12.0, rect.top() + 12.0, egui::Stroke::new(1.0, BORDER));
+        painter.hline(
+            Rangef::new(rect.left() + 12.0, rect.right() - 12.0),
+            rect.top() + 12.0,
+            BORDER,
+        );
 
         let inner = rect.shrink2(egui::vec2(12.0, 8.0));
         let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(Align::Center)));
         bar_ui.set_clip_rect(inner);
         // 状态文字
         if self.backend_ok {
-            let color = if self.preset.dirty { WARN } else { OK };
+            let color = if self.dirty { WARN } else { OK };
             bar_ui.label(RichText::new(t(self.lang, "backend_connected")).size(11.0).color(color));
         } else {
             bar_ui.label(
