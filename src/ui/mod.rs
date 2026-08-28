@@ -27,6 +27,10 @@ pub struct AcajaApp {
     store: Arc<Mutex<PresetStore>>,
     /// 最近一次向后端推送时间（IPC 节流）
     last_send: std::time::Instant,
+    /// 后端连接状态（找到主进程窗口则 true）
+    backend_ok: bool,
+    /// 有未送达的修改（找不到后端时挂起，每秒重试）
+    pending_send: bool,
     template_name: &'static str,
 
     /// 工作副本（界面直接编辑此预设）
@@ -109,6 +113,8 @@ impl AcajaApp {
         let mut app = AcajaApp {
             store,
             last_send: std::time::Instant::now(),
+            backend_ok: false,
+            pending_send: false,
             template_name: "tpl_apex",
             preset,
             active_name,
@@ -178,16 +184,26 @@ impl AcajaApp {
     }
 
     /// 实时推送最新参数到后台壳进程（WM_COPYDATA，33ms 节流）。
-    /// 后端起覆盖层/热键/手柄即时更新；找不到后端（异常）则静默，保存仍走文件。
+    /// 找不到后端时挂起 pending 并每秒重试，UI 显示连接状态条。
     fn send_to_backend(&mut self) {
         let now = std::time::Instant::now();
-        if now.duration_since(self.last_send) < std::time::Duration::from_millis(33) {
+        let interval = if self.backend_ok {
+            std::time::Duration::from_millis(33)
+        } else {
+            std::time::Duration::from_secs(1) // 未连接：慢速重试
+        };
+        if now.duration_since(self.last_send) < interval && !self.pending_send {
             return;
         }
         self.last_send = now;
-        let json = crate::ipc::preset_payload(&self.preset, self.visible);
+        self.pending_send = false;
         if let Some(hwnd) = crate::ipc::find_backend() {
+            let json = crate::ipc::preset_payload(&self.preset, self.visible);
             let _ = crate::ipc::send_json(hwnd, crate::ipc::IPC_TAG_PRESET, &json);
+            self.backend_ok = true;
+        } else {
+            self.backend_ok = false;
+            self.pending_send = true;
         }
     }
 
@@ -240,6 +256,12 @@ impl AcajaApp {
             ui.label(RichText::new(t(self.lang, "close_quits")).size(10.5).weak());
         });
         ui.add_space(6.0);
+        // ---- 主程序连接状态 ----
+        if self.backend_ok {
+            ui.label(RichText::new(t(self.lang, "backend_connected")).size(10.5).color(Color32::from_rgb(48, 209, 88)));
+        } else {
+            ui.label(RichText::new(t(self.lang, "backend_disconnected")).size(10.5).color(Color32::from_rgb(255, 150, 60)));
+        }
 
         // 语言/主题变更持久化
         let mut store = self.store.lock().unwrap();

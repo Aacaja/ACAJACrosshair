@@ -249,20 +249,43 @@ fn create_message_window() -> HWND {
     }
 }
 
-/// 拉起设置 UI 进程（独立二进制 acaja-ui.exe；单例由 UI 进程自身互斥体保证）
+/// 拉起设置 UI 进程（独立二进制 acaja-ui.exe；单例由 UI 进程自身互斥体保证）。
+/// v1.1.2：绝对路径候选（exe 同目录 → 工作目录），全部失败给出明确提示。
 fn spawn_ui_process() {
-    use std::path::PathBuf;
-    // 优先：同目录 acaja-ui.exe（双 exe 拆分，后端免链接 egui）
-    let exe = std::env::current_exe().ok();
-    let ui_exe = exe
-        .as_ref()
-        .map(|p| p.parent().map(|d| d.join("acaja-ui.exe")))
-        .flatten()
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("acaja-ui.exe"));
-    match std::process::Command::new(&ui_exe).spawn() {
-        Ok(_) => info!("设置进程已拉起: {}", ui_exe.display()),
-        Err(e) => warn!("设置进程拉起失败（{}）: {e}", ui_exe.display()),
+    use std::path::{Path, PathBuf};
+    // 候选：exe 同目录（最常见）→ 影响工作目录 → 相对名
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = &exe_dir {
+        candidates.push(dir.join("acaja-ui.exe"));
+    }
+    candidates.push(PathBuf::from("acaja-ui.exe"));
+    for c in &candidates {
+        if !Path::new(c).exists() {
+            continue;
+        }
+        match std::process::Command::new(c).spawn() {
+            Ok(_) => {
+                info!("设置进程已拉起: {}", c.display());
+                return;
+            }
+            Err(e) => warn!("设置进程拉起失败（{}）: {e}", c.display()),
+        }
+    }
+    warn!("未找到 acaja-ui.exe（查找过: {:?}）", candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
+    // 明确提示（发行版无日志，此提示是唯一反馈）
+    let text = format!(
+        "未找到设置程序 acaja-ui.exe\n\n请确认它与主程序放在同一目录，然后重试（托盘 → 打开设置）。"
+    );
+    let t16: Vec<u16> = "ACAJA 提示".encode_utf16().chain(std::iter::once(0)).collect();
+    let m16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            None,
+            windows::core::PCWSTR(m16.as_ptr()),
+            windows::core::PCWSTR(t16.as_ptr()),
+            windows::Win32::UI::WindowsAndMessaging::MB_OK,
+        );
     }
 }
 
