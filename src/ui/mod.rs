@@ -27,6 +27,10 @@ const STATUS_TTL: std::time::Duration = std::time::Duration::from_millis(1600);
 /// egui Context 全局句柄（消息线程在托盘退出时经它关闭设置窗口）
 pub static UI_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
 
+/// 后台隐藏状态（用于渲染 ≤1fps 压制，替代不可靠的窗口可见性查询）
+pub static UI_HIDDEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// 主动退出标记：托盘「退出」时为 true；用户点窗口 X 不会置位
 pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -38,6 +42,7 @@ pub static UI_OPEN: std::sync::atomic::AtomicBool =
 /// 请求打开设置窗口。返回 true = 窗口已在显示（已聚焦）；false = 由主线程重新创建。
 pub fn show_settings_window() -> bool {
     if UI_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+        UI_HIDDEN.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(ctx) = UI_CTX.get() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -279,6 +284,7 @@ impl AcajaApp {
                 // update() 中已对隐藏状态做 ≤1fps 渲染压制，杜绝 v1.0.8 的 6% 空转。
                 let (name, preset) = (self.active_name.clone(), self.preset.clone());
                 let _ = self.store.lock().unwrap().save_preset(&name, &preset);
+                UI_HIDDEN.store(true, std::sync::atomic::Ordering::SeqCst);
                 if let Some(ctx) = UI_CTX.get() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -831,8 +837,7 @@ impl eframe::App for AcajaApp {
         // ---- 后台（隐藏）状态：压制渲染 ≤1fps ----
         // 隐藏窗口会失去 vsync 节流，若有重绘源会空转（曾实测 6% CPU）。
         // 隐藏期间强制最低帧率，每帧重排 1s 后重绘 -> 渲染频率 ≤1fps，CPU 可忽略。
-        let hidden = ctx.input(|i| i.viewport().visible) == Some(false);
-        if hidden {
+        if UI_HIDDEN.load(std::sync::atomic::Ordering::SeqCst) {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
 
