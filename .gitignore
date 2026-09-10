@@ -36,7 +36,22 @@ target/
 dist/
 
 # Logs
-*.log*.lnk
+*.log
+*.lnk
+
+# 旧版 Python / PySide6 实现与 PyInstaller 产物
+# （已被 Rust 重写版取代；文件仍留在本地磁盘，只是不再进仓库）
+/小林の准星.exe
+/background_dialog.py
+/border_settings_dialog.py
+/build_v3.1.0.py
+/config_ui_pyside6.py
+/crosshair_pyside6.py
+/overlay_window_pyside6.py
+/theme.py
+/requirements.txt
+# 任何 exe 都不该进仓库（CI 负责构建产物）
+*.exe
 
 # Cargo.lock 故意不跟踪（保持依赖解析与 CI 一致）
 Cargo.lock
