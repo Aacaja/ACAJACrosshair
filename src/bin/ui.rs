@@ -7,7 +7,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use log::{info, warn};
 use windows::Win32::Foundation::{GetLastError, HANDLE, ERROR_ALREADY_EXISTS};

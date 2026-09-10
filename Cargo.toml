@@ -8,7 +8,7 @@ path = "src/bin/ui.rs"
 
 [package]
 name = "acaja"
-version = "1.1.6"
+version = "1.1.7"
 edition = "2021"
 description = "ACAJA - Windows crosshair overlay tool"
 authors = ["Aacaja"]
@@ -52,6 +52,8 @@ ab_glyph = "0.2.11"
 
 # 并发与事件
 crossbeam-channel = "0.5"
+# 锁：无中毒语义（parking_lot 的 lock()/read()/write() 直接返回 guard，没有 PoisonError）
+parking_lot = "0.12"
 
 # 自定义图片准星解码
 image = "0.25"

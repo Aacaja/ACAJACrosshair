@@ -9,7 +9,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use log::{info, warn};
@@ -29,7 +31,6 @@ use acaja::input::raw_mouse::{RawMouseEvent, handle_raw_input, register_raw_mous
 use acaja::ipc::IPC_TAG_PRESET;
 use acaja::overlay::OverlayHandle;
 use acaja::state::{AppState, SharedPreset, apply_ads_event, next_preset, snap_position};
-use acaja::sync;
 use acaja::system::foreground::{FgEvent, start_fg_watcher};
 use acaja::system::hotkey::{HOTKEY_ID_NEXT_PRESET, HOTKEY_ID_TOGGLE, register as reg_hotkey, unregister as unreg_hotkey};
 use acaja::system::tray::{self, CMD_QUIT, CMD_SETTINGS, CMD_TOGGLE, Tray, WM_TRAYICON};
@@ -65,7 +66,7 @@ struct FileWatch {
 
 impl MainState {
     fn preset(&self) -> Arc<Preset> {
-        sync::read(&self.shared).preset.clone()
+        self.shared.read().preset.clone()
     }
 
     fn position_for_preset(&self) -> (i32, i32) {
@@ -82,15 +83,15 @@ impl MainState {
     /// 重载当前预设（激活/切换后），更新共享仓库与热键
     fn reload_preset(&mut self) {
         let preset: Arc<Preset> = {
-            let store = sync::lock(&self.store);
+            let store = self.store.lock();
             Arc::new(store.get_active().clone())
         };
         {
-            let mut w = sync::write(&self.shared);
+            let mut w = self.shared.write();
             w.preset = preset;
             w.version = w.version.wrapping_add(1);
         }
-        self.last_version = sync::read(&self.shared).version;
+        self.last_version = self.shared.read().version;
         self.apply_hotkeys();
         self.sync_gamepad_cfg();
         self.full_update();
@@ -110,11 +111,11 @@ impl MainState {
         let preset = Arc::new(preset);
         info!("IPC: 收到 UI 推送 shape={:?} visible={}", preset.shape, visible);
         {
-            let mut w = sync::write(&self.shared);
+            let mut w = self.shared.write();
             w.preset = preset;
             w.version = w.version.wrapping_add(1);
         }
-        self.last_version = sync::read(&self.shared).version;
+        self.last_version = self.shared.read().version;
         self.app.visible = visible;
         self.apply_hotkeys();
         self.sync_gamepad_cfg();
@@ -123,7 +124,7 @@ impl MainState {
 
     fn sync_gamepad_cfg(&mut self) {
         let p = self.preset();
-        *sync::write(&self.gamepad_cfg) = RuntimeGamepadCfg::from_preset(&p);
+        *self.gamepad_cfg.write() = RuntimeGamepadCfg::from_preset(&p);
     }
 
     fn apply_hotkeys(&mut self) {
@@ -159,7 +160,7 @@ impl MainState {
         // 预设名可能变了（app.json 的 last_preset）——先看 app.json
         if app_mtime != self.watched.app_mtime {
             self.watched.app_mtime = app_mtime;
-            let name = { sync::lock(&self.store).active_name() };
+            let name = { self.store.lock().active_name() };
             if name != self.watched.preset_name {
                 self.watched.preset_name = name.clone();
                 info!("配置监控: 激活预设切换为 {name}");
@@ -190,11 +191,11 @@ impl MainState {
         };
         let preset = Arc::new(preset);
         {
-            let mut w = sync::write(&self.shared);
+            let mut w = self.shared.write();
             w.preset = preset.clone();
             w.version = w.version.wrapping_add(1);
         }
-        self.last_version = sync::read(&self.shared).version;
+        self.last_version = self.shared.read().version;
         self.apply_hotkeys();
         self.sync_gamepad_cfg();
         self.full_update();
@@ -219,12 +220,12 @@ impl MainState {
 
     fn cycle_preset(&mut self) {
         let (names, current) = {
-            let store = sync::lock(&self.store);
+            let store = self.store.lock();
             (store.preset_names(), store.active_name())
         };
         let next = next_preset(&current, &names);
         if next != current {
-            let ok = { sync::lock(&self.store).activate(&next) };
+            let ok = { self.store.lock().activate(&next) };
             if ok {
                 info!("热键切到预设: {next}");
                 self.reload_preset();
@@ -389,7 +390,7 @@ fn handle_fg_event(state: &mut MainState, fg: FgEvent) {
         FgEvent::Changed { exe, .. } => {
             state.fg_exe = exe.clone();
             let binding = {
-                let store = sync::lock(&state.store);
+                let store = state.store.lock();
                 store
                     .app
                     .game_bindings
@@ -398,9 +399,9 @@ fn handle_fg_event(state: &mut MainState, fg: FgEvent) {
                     .map(|b| b.preset.clone())
             };
             if let Some(preset_name) = binding {
-                let current = { sync::lock(&state.store).active_name() };
+                let current = { state.store.lock().active_name() };
                 if current != preset_name
-                    && sync::lock(&state.store).activate(&preset_name)
+                    && state.store.lock().activate(&preset_name)
                 {
                     info!("前台 {exe} → 自动切换预设 {preset_name}");
                     state.reload_preset();
@@ -448,7 +449,7 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
                         state.toggle_visible();
                     } else if what == WM_RBUTTONUP || what == WM_CONTEXTMENU {
                         // 菜单文案跟随 app.json 的语言设置（此前写死中文）
-                        let lang = sync::lock(&state.store).app.lang();
+                        let lang = state.store.lock().app.lang();
                         let labels = [
                             t(lang, "tray_toggle"),
                             t(lang, "tray_settings"),
@@ -558,9 +559,7 @@ fn install_panic_hook() {
                 let _ = writeln!(f, "[{:?}] {msg}", std::time::SystemTime::now());
             }
         }
-        if let Ok(mut slot) = LAST_PANIC.lock() {
-            *slot = Some(msg);
-        }
+        *LAST_PANIC.lock() = Some(msg);
     }));
 }
 
@@ -598,11 +597,7 @@ fn report_caught_panic(count: u32) {
     if count > 1 {
         return;
     }
-    let detail = LAST_PANIC
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-        .unwrap_or_default();
+    let detail = LAST_PANIC.lock().clone().unwrap_or_default();
     let path = crash_log_path()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
@@ -658,13 +653,13 @@ fn backend_process_main() {
         }
     };
     let store = Arc::new(Mutex::new(store));
-    info!("当前预设：{}", sync::lock(&store).active_name());
+    info!("当前预设：{}", store.lock().active_name());
 
     // ---- 覆盖层 ----
     let (overlay, overlay_thread) = acaja::overlay::start();
 
     // ---- 共享状态 ----
-    let initial_preset = Arc::new(sync::lock(&store).get_active().clone());
+    let initial_preset = Arc::new(store.lock().get_active().clone());
     let shared: Arc<RwLock<SharedPreset>> = Arc::new(RwLock::new(SharedPreset {
         version: 1,
         preset: initial_preset.clone(),
@@ -672,7 +667,7 @@ fn backend_process_main() {
     let gamepad_cfg: Arc<RwLock<RuntimeGamepadCfg>> =
         Arc::new(RwLock::new(RuntimeGamepadCfg::from_preset(&initial_preset)));
 
-    let active_name = { sync::lock(&store).active_name() };
+    let active_name = { store.lock().active_name() };
     let mut state = MainState {
         store,
         overlay: overlay.clone(),

@@ -9,7 +9,9 @@ pub mod fonts;
 pub mod preview;
 pub mod strings;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Instant;
 
 use egui::{Align, Color32, ComboBox, Context, Margin, Rangef, RichText, Rounding, TextEdit, Ui, Visuals};
@@ -143,7 +145,7 @@ impl AcajaApp {
             info!("未找到中文字体，界面将回退系统字体");
         }
 
-        let store_guard = store.lock().unwrap();
+        let store_guard = store.lock();
         let preset = store_guard.get_active().clone();
         let active_name = store_guard.active_name();
         let lang = store_guard.app.lang();
@@ -230,7 +232,7 @@ impl AcajaApp {
 
     fn save_current(&mut self) {
         let result = {
-            let mut store = self.store.lock().unwrap();
+            let mut store = self.store.lock();
             let res = store.save_preset(&self.active_name.clone(), &self.preset);
             if res.is_ok() {
                 let _ = store.save_app();
@@ -246,7 +248,7 @@ impl AcajaApp {
     fn apply_preset(&mut self, name: &str) {
         let name = name.to_string();
         {
-            let mut store = self.store.lock().unwrap();
+            let mut store = self.store.lock();
             if let Some(p) = store.get(&name).cloned() {
                 self.preset = p;
                 self.active_name = name.clone();
@@ -262,7 +264,7 @@ impl AcajaApp {
     fn push_to_backend(&mut self) {
         let (name, preset) = (self.active_name.clone(), self.preset.clone());
         let saved = {
-            let mut st = self.store.lock().unwrap();
+            let mut st = self.store.lock();
             let r = st.save_preset(&name, &preset);
             if r.is_ok() {
                 let _ = st.save_app();
@@ -359,7 +361,7 @@ impl AcajaApp {
             });
         });
         // 语言/主题变更持久化
-        let mut store = self.store.lock().unwrap();
+        let mut store = self.store.lock();
         if store.app.language != self.lang.code() || store.app.theme != self.theme {
             store.app.language = self.lang.code().to_string();
             store.app.theme = self.theme.clone();
@@ -862,7 +864,7 @@ impl AcajaApp {
         Self::card(ui, Some(t(self.lang, "presets")), |ui| {
             ui.horizontal(|ui| {
                 ui.label(t(self.lang, "preset_current"));
-                let names = { self.store.lock().unwrap().preset_names() };
+                let names = { self.store.lock().preset_names() };
                 ComboBox::from_id_salt("preset_new")
                     .width(160.0)
                     .selected_text(self.active_name.clone())
@@ -884,7 +886,7 @@ impl AcajaApp {
                         self.flash(t(self.lang, "cannot_delete_default").to_string());
                     } else {
                         let (ok, name) = {
-                            let mut store = self.store.lock().unwrap();
+                            let mut store = self.store.lock();
                             let name = self.active_name.clone();
                             let ok = store.delete_preset(&name).unwrap_or(false);
                             if ok {
@@ -907,7 +909,7 @@ impl AcajaApp {
                     let name = self.new_preset_name.trim().to_string();
                     if !name.is_empty() {
                         let result = {
-                            let mut store = self.store.lock().unwrap();
+                            let mut store = self.store.lock();
                             let res = store.save_preset(&name, &self.preset);
                             if res.is_ok() {
                                 let _ = store.save_app();
@@ -930,7 +932,7 @@ impl AcajaApp {
         // ---- 游戏绑定：前台进程 → 自动套用预设 ----
         Self::card(ui, Some(t(self.lang, "bindings")), |ui| {
             let bindings: Vec<(String, String)> = {
-                let store = self.store.lock().unwrap();
+                let store = self.store.lock();
                 store
                     .app
                     .game_bindings
@@ -966,7 +968,7 @@ impl AcajaApp {
                         .hint_text(t(self.lang, "binding_exe"))
                         .desired_width(170.0),
                 );
-                let names = { self.store.lock().unwrap().preset_names() };
+                let names = { self.store.lock().preset_names() };
                 ComboBox::from_id_salt("bind_preset")
                     .width(120.0)
                     .selected_text(self.new_binding_preset.clone())
@@ -992,7 +994,7 @@ impl AcajaApp {
                             self.new_binding_preset.clone()
                         };
                         let saved = {
-                            let mut store = self.store.lock().unwrap();
+                            let mut store = self.store.lock();
                             // 同名进程只保留一条（重复添加 = 覆盖绑定）
                             store.app.game_bindings.retain(|b| !b.exe.eq_ignore_ascii_case(&exe));
                             store.app.game_bindings.push(GameBinding { exe: exe.clone(), preset });
@@ -1009,7 +1011,7 @@ impl AcajaApp {
             });
             if let Some(i) = remove {
                 let saved = {
-                    let mut store = self.store.lock().unwrap();
+                    let mut store = self.store.lock();
                     if i < store.app.game_bindings.len() {
                         store.app.game_bindings.remove(i);
                     }
@@ -1026,33 +1028,39 @@ impl AcajaApp {
     /// 系统：应用级开关（开机自启）
     fn section_system(&mut self, ui: &mut Ui) {
         Self::card(ui, Some(t(self.lang, "system")), |ui| {
-            let mut autostart = { self.store.lock().unwrap().app.autostart };
+            let mut autostart = { self.store.lock().app.autostart };
             if ui.checkbox(&mut autostart, t(self.lang, "autostart")).changed() {
-                {
-                    let mut store = self.store.lock().unwrap();
-                    store.app.autostart = autostart;
-                    let _ = store.save_app();
-                }
                 // 注册表必须指向**主程序**（acaja.exe）的真实路径：路径从主进程
                 // 窗口反查得到，所以程序被改名/移动也不会写错目标。
-                // 主程序未运行时无法确定路径 → 只保存开关状态并提示。
+                // 主程序未运行时无法确定路径 → 不写注册表。
                 let target = crate::ipc::find_backend()
                     .and_then(crate::system::foreground::window_process_path);
-                match target {
+                let applied = match &target {
                     Some(path) => {
-                        match crate::system::autostart::set_autostart(autostart, std::path::Path::new(&path)) {
-                            Ok(()) => self.flash(t(self.lang, "saved").to_string()),
+                        match crate::system::autostart::set_autostart(autostart, std::path::Path::new(path)) {
+                            Ok(()) => true,
                             Err(e) => {
                                 warn!("开机自启写入注册表失败: {e}");
-                                self.flash(format!("{}: {e}", t(self.lang, "autostart_failed")));
+                                false
                             }
                         }
                     }
                     None => {
                         warn!("未找到主程序窗口，无法确定自启路径");
-                        self.flash(t(self.lang, "autostart_failed").to_string());
+                        false
                     }
+                };
+                {
+                    // 失败则回滚开关，避免「界面显示已开启、注册表里其实没有」
+                    let mut store = self.store.lock();
+                    store.app.autostart = if applied { autostart } else { !autostart };
+                    let _ = store.save_app();
                 }
+                self.flash(if applied {
+                    t(self.lang, "saved").to_string()
+                } else {
+                    t(self.lang, "autostart_failed").to_string()
+                });
             }
             ui.label(RichText::new(t(self.lang, "autostart_note")).size(10.5).color(TEXT_DIM));
         });
@@ -1138,7 +1146,7 @@ impl eframe::App for AcajaApp {
         // 退出前自动保存当前准星设置 → 下次打开沿用（不需要手动点保存）
         let (name, preset) = (self.active_name.clone(), self.preset.clone());
         let result = {
-            let mut store = self.store.lock().unwrap();
+            let mut store = self.store.lock();
             let res = store.save_preset(&name, &preset);
             if res.is_ok() {
                 let _ = store.save_app();

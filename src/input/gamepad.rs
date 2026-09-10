@@ -6,7 +6,12 @@
 //! XInput 不在 windows-rs 中，手动链接：
 //! `XInputGetState(dwUserIndex: u32, pState: *mut XINPUT_STATE) -> u32`（ERROR_SUCCESS=0，ERROR_DEVICE_NOT_CONNECTED=1167）
 
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
+use parking_lot::RwLock;
 
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::Win32::Foundation::HWND;
@@ -133,7 +138,7 @@ pub fn start_gamepad(
 
             while !stop2.load(Ordering::SeqCst) {
                 // 动态读取配置（轻量读锁）
-                let cfg_now = *crate::sync::read(&cfg);
+                let cfg_now = *cfg.read();
                 let threshold = cfg_now.threshold.max(1);
                 let ads_source = cfg_now.ads_source;
 

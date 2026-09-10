@@ -13,6 +13,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
@@ -49,15 +51,15 @@ pub fn start_fg_watcher(tx: Sender<FgEvent>) -> Option<HWINEVENTHOOK> {
 
     // 全局状态：channel 与移动事件节流时间
     static CH: std::sync::OnceLock<Arc<Sender<FgEvent>>> = std::sync::OnceLock::new();
-    static LAST: std::sync::OnceLock<Arc<std::sync::Mutex<Instant>>> = std::sync::OnceLock::new();
+    static LAST: std::sync::OnceLock<Arc<Mutex<Instant>>> = std::sync::OnceLock::new();
     let _ = CH.set(tx.clone());
-    let _ = LAST.set(Arc::new(std::sync::Mutex::new(
+    let _ = LAST.set(Arc::new(Mutex::new(
         Instant::now() - std::time::Duration::from_millis(200),
     )));
     fn get_tx() -> Arc<Sender<FgEvent>> {
         CH.get().expect("fg watcher not initialized").clone()
     }
-    fn get_last_move() -> Arc<std::sync::Mutex<Instant>> {
+    fn get_last_move() -> Arc<Mutex<Instant>> {
         LAST.get().expect("fg watcher not initialized").clone()
     }
 
@@ -84,7 +86,7 @@ pub fn start_fg_watcher(tx: Sender<FgEvent>) -> Option<HWINEVENTHOOK> {
             }
             EVENT_SYSTEM_MOVESIZEEND => {
                 let now = Instant::now();
-                let mut l = crate::sync::lock(&last);
+                let mut l = last.lock();
                 if now.duration_since(*l) < std::time::Duration::from_millis(100) {
                     return;
                 }
