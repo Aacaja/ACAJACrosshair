@@ -102,12 +102,56 @@ src/
 ## Requirements
 - Windows 10 / 11 (x64). No runtime dependencies.
 
-## Roadmap
-- [x] S0–S5 complete (see README_CN for details)
-- [x] **v1.1.x** two-process split, nav-based UI redesign
-- [x] **v1.1.7** blank nav labels fixed; autostart toggle, game-binding editor, snap toggle, next-preset hotkey;
-      always-on crash log + panic containment (see WORKLOG)
-- [ ] Backlog: image file picker; exclusive-fullscreen support (OS limitation, effectively impossible)
+## Iteration Roadmap (features first · backend stays absolutely lean)
+
+> Design law: **the backend `acaja.exe` stays absolutely clean and lightweight** — no UI framework, no extra threads/polling,
+> no system-wide hooks, no new dependencies. Heavy lifting lives only in the settings process `acaja-ui.exe` (launched on
+> demand, cost doesn't matter). No in-game quick panel.
+
+| Iteration | Version | Theme | Status |
+|---|---|---|---|
+| 1 | **v1.2.0** | Profile & editing workflow + Liquid Glass UI | ✅ done |
+| 2 | v1.2.1 | Dynamic crosshair & firing feedback (recoil curve / burst stacking / fire source) | ⏳ next |
+| 3 | v1.2.2 | Multi-monitor & game integration (snap rules / per-monitor profiles / process picker) | ⏳ queued |
+| 4 | v1.3.0 | Usability polish (config backup & rollback / portable mode / tray preset submenu / perf panel) | ⏳ queued |
+
+### Iteration 1 (v1.2.0) — shipped
+
+**Features**
+- **Profile list management**: activate / duplicate / rename / delete (inline confirm) / export JSON / import JSON;
+  renaming migrates game bindings that referenced the old name, importing auto-suffixes on name conflicts.
+- **Preset-name validation**: names become filenames, so illegal names (`../`, `\`, `:`, reserved `CON`, too long, control
+  chars) are rejected with an inline hint — no more writes outside the config folder.
+- **Hotkey recording**: click the field and press the combination (Ctrl/Alt/Shift/Win + letters/digits/F1-F24/arrows/symbols);
+  Esc cancels, one-click clear. No more typing `Ctrl+F1` by hand.
+- **Monitor picker**: real resolution + primary marker per monitor, one click to move the crosshair to that screen's center
+  (`-1` = follow the foreground window).
+- **Image file picker** for custom crosshairs (native dialog) and a clear button.
+- **Template gallery**: the 8 style templates became a thumbnail grid — click to apply.
+
+**UI**
+- Apple Liquid Glass: frameless window + custom draggable titlebar, deep-space backdrop with soft light blobs, glass panels
+  with specular rim highlights, concentric radii, hover lift, spring transitions, refined dark/light palettes; on Windows 11
+  the window additionally gets system rounded corners + acrylic backdrop (graceful fallback — the UI is self-contained).
+
+### Iteration 2 (v1.2.1) — next up
+- Per-shot **recoil curve** (burst stacking, per-shot delta, cap, recovery rate) with a visual preview of the expansion;
+- independent fire sources (left mouse button / gamepad RT);
+- muzzle/hit flash indicator and an alternative recovery-bar style.
+- Explicitly NOT doing: keyboard-hook "hold hotkey" (violates the lightweight law; mouse right-button / gamepad hold modes cover it).
+
+### Iteration 3 (v1.2.2) — multi-monitor & game integration
+- Snap rules (window work area / client area) with a tunable vertical offset factor;
+- per-monitor profile bindings;
+- game-binding "auto-detect": pick the exe from running processes instead of typing it;
+- "auto-hide when the game is not foreground".
+
+### Iteration 4 (v1.3.0) — usability polish
+- Timestamped config backups + one-click rollback;
+- portable mode (config next to the exe);
+- tray preset submenu (menu built in the backend, zero new threads);
+- performance panel (sampled from the UI process, zero backend cost);
+- bilingual/doc consistency audit and a first-run guide.
 
 ## License
 MIT. Original author: 林晓CCC — Bilibili: https://space.bilibili.com/622769073

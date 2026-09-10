@@ -8,7 +8,7 @@ path = "src/bin/ui.rs"
 
 [package]
 name = "acaja"
-version = "1.1.7"
+version = "1.2.0"
 edition = "2021"
 description = "ACAJA - Windows crosshair overlay tool"
 authors = ["Aacaja"]
@@ -23,6 +23,7 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Security",
@@ -61,6 +62,9 @@ image = "0.25"
 # 日志
 log = "0.4"
 simplelog = "0.12"
+
+# 原生文件对话框（自定义图片选择、预设导入/导出）
+rfd = "0.17"
 
 [build-dependencies]
 winres = "0.1"

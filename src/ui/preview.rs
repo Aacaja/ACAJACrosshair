@@ -3,7 +3,7 @@
 //! 棋盘格背景模拟过场画面，准星按预设参数居中渲染，
 //! 描边层 + 四象限分色与 overlay 的 draw_prims 逻辑镜像。
 
-use egui::{pos2, Color32, Rect, Shape, Stroke, Ui};
+use egui::{pos2, Color32, Mesh, Rect, Shape, Stroke, Ui};
 
 use crate::config::Preset;
 use crate::overlay::parse_hex;
@@ -11,34 +11,53 @@ use crate::overlay::shapes::{rotation_safe_radius, Prim, ShapeParams, SLOT_BOTTO
 
 /// 在给定区域绘制预览
 pub fn paint_preview(ui: &mut Ui, rect: Rect, preset: &Preset, lang: crate::i18n::Lang) {
+    paint_preview_cells(ui, rect, preset, lang, 8.0);
+}
+
+/// 同 `paint_preview`，可指定棋盘格边长。
+///
+/// 模板缩略图（8 个格子同时绘制）用更大的格子，配合 Mesh 合并，
+/// 让整帧的图元数量保持在很低的水位（拖动滑杆时每帧都会重绘整个预览区）。
+pub fn paint_preview_cells(
+    ui: &mut Ui,
+    rect: Rect,
+    preset: &Preset,
+    lang: crate::i18n::Lang,
+    cell: f32,
+) {
     let painter = ui.painter_at(rect);
 
-    // ---- 棋盘格背景 ----
-    let cell = 8.0;
+    // ---- 棋盘格背景（单个 Mesh：每格 2 个三角形，一次提交） ----
+    let cell = cell.max(4.0);
     let light = Color32::from_gray(46);
     let dark = Color32::from_gray(38);
-    painter.rect_filled(rect, 6.0, dark);
-    let mut y = rect.top();
-    let mut row = 0i32;
-    while y < rect.bottom() {
-        let mut x = rect.left();
-        let mut col = 0i32;
-        while x < rect.right() {
+    // 3px 边框：既像「屏幕边框」，也把方角棋盘与圆角外框的差值藏起来
+    painter.rect_filled(rect, 8.0, Color32::from_gray(28));
+    let grid = rect.shrink(3.0);
+    let mut mesh = Mesh::default();
+    let cols = (grid.width() / cell).ceil().max(1.0) as i32;
+    let rows = (grid.height() / cell).ceil().max(1.0) as i32;
+    for row in 0..rows {
+        for col in 0..cols {
+            let x0 = grid.left() + col as f32 * cell;
+            let y0 = grid.top() + row as f32 * cell;
+            let x1 = (x0 + cell).min(grid.right());
+            let y1 = (y0 + cell).min(grid.bottom());
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
             let c = if (row + col) % 2 == 0 { light } else { dark };
-            painter.rect_filled(
-                Rect::from_min_max(
-                    pos2(x, y),
-                    pos2((x + cell).min(rect.right()), (y + cell).min(rect.bottom())),
-                ),
-                0.0,
-                c,
-            );
-            x += cell;
-            col += 1;
+            let base = mesh.vertices.len() as u32;
+            mesh.colored_vertex(pos2(x0, y0), c);
+            mesh.colored_vertex(pos2(x1, y0), c);
+            mesh.colored_vertex(pos2(x0, y1), c);
+            mesh.colored_vertex(pos2(x1, y1), c);
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base + 2, base + 1, base + 3);
         }
-        y += cell;
-        row += 1;
     }
+    painter.add(Shape::mesh(mesh));
+    painter.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, Color32::from_gray(62)));
 
     // ---- 几何 ----
     let params = ShapeParams::from_preset(preset, 0.0);

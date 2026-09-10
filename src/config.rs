@@ -301,6 +301,19 @@ fn vk_to_key_token(vk: u32) -> &'static str {
         0x28 => "Down",
         0x25 => "Left",
         0x27 => "Right",
+        // OEM 符号键：必须与 key_token_to_vk 一一对应。
+        // 否则 Display 会输出 "Ctrl+?"，再解析回来失败 → 预设文件反序列化直接报错（热键丢失）。
+        0xBD => "-",
+        0xBB => "=",
+        0xDB => "[",
+        0xDD => "]",
+        0xDC => "\\",
+        0xBA => ";",
+        0xDE => "'",
+        0xBC => ",",
+        0xBE => ".",
+        0xBF => "/",
+        0xC0 => "`",
         _ => "?",
     }
 }
@@ -697,6 +710,40 @@ pub struct PresetStore {
 const APP_FILE: &str = "app.json";
 const PRESETS_DIR: &str = "presets";
 
+/// 预设名合法性校验。
+///
+/// 预设名会直接变成文件名（`presets/<名>.json`），因此必须挡住路径分隔符与保留名：
+/// 否则用户（或导入的文件名）写 `../app` 就能覆盖配置目录之外的文件。
+/// 返回 `Err(提示文案)`，UI 可直接展示给用户。
+pub fn validate_preset_name(name: &str) -> Result<(), &'static str> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("预设名不能为空");
+    }
+    if n.chars().count() > 40 {
+        return Err("预设名过长（最多 40 个字符）");
+    }
+    if n.chars().any(|c| c.is_control()) {
+        return Err("预设名不能包含控制字符");
+    }
+    if n.chars().any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')) {
+        return Err("预设名不能包含 \\ / : * ? \" < > |");
+    }
+    if n == "." || n == ".." || n.ends_with('.') || n.ends_with(' ') {
+        return Err("预设名不能以点或空格结尾");
+    }
+    // Windows 保留设备名（不区分大小写，忽略扩展名部分）
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = n.split('.').next().unwrap_or(n).trim_end().to_ascii_uppercase();
+    if RESERVED.contains(&stem.as_str()) {
+        return Err("预设名与系统保留名冲突");
+    }
+    Ok(())
+}
+
 impl PresetStore {
     /// 打开/创建配置仓库（目录不存在时创建）
     pub fn open(dir: &Path) -> io::Result<PresetStore> {
@@ -786,6 +833,8 @@ impl PresetStore {
     // ---- 写操作 ----
 
     pub fn save_preset(&mut self, name: &str, preset: &Preset) -> io::Result<()> {
+        let name = name.trim();
+        validate_preset_name(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let path = self.dir.join(PRESETS_DIR).join(format!("{name}.json"));
         Self::write_json_atomic(&path, preset)?;
         self.presets.insert(name.to_string(), preset.clone());
@@ -793,7 +842,7 @@ impl PresetStore {
     }
 
     pub fn delete_preset(&mut self, name: &str) -> io::Result<bool> {
-        if name == "default" {
+        if name == "default" || validate_preset_name(name).is_err() {
             return Ok(false);
         }
         let path = self.dir.join(PRESETS_DIR).join(format!("{name}.json"));
@@ -821,6 +870,91 @@ impl PresetStore {
 
     pub fn save_app(&self) -> io::Result<()> {
         Self::write_json_atomic(&self.dir.join(APP_FILE), &self.app)
+    }
+
+    // ---- 档案管理（Crosshair X 风格：复制 / 重命名 / 导入 / 导出） ----
+
+    /// 复制预设为副本，名字自动去重（`名字 副本`、`名字 副本2`…），返回副本名
+    pub fn duplicate_preset(&mut self, name: &str) -> io::Result<String> {
+        let src = self
+            .presets
+            .get(name)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "预设不存在"))?;
+        let mut new_name = format!("{name} 副本");
+        let mut i = 2;
+        while self.presets.contains_key(&new_name) {
+            new_name = format!("{name} 副本{i}");
+            i += 1;
+        }
+        self.save_preset(&new_name, &src)?;
+        Ok(new_name)
+    }
+
+    /// 重命名预设：旧名删除、新名落盘；`default` 不可改名、目标名已存在则返回 `Ok(false)`。
+    /// 引用旧名的游戏绑定会一并迁移（否则绑定会指向不存在的预设）。
+    pub fn rename_preset(&mut self, from: &str, to: &str) -> io::Result<bool> {
+        let to = to.trim();
+        if from == "default" || !self.presets.contains_key(from) || from == to {
+            return Ok(false);
+        }
+        validate_preset_name(to).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        if self.presets.contains_key(to) {
+            return Ok(false);
+        }
+        let preset = self.presets.get(from).cloned().unwrap_or_default();
+        self.save_preset(to, &preset)?;
+        self.delete_preset(from)?;
+        if self.app.last_preset == from {
+            let _ = self.activate(to);
+        }
+        let mut touched = false;
+        for b in self.app.game_bindings.iter_mut() {
+            if b.preset == from {
+                b.preset = to.to_string();
+                touched = true;
+            }
+        }
+        if touched {
+            let _ = self.save_app();
+        }
+        Ok(true)
+    }
+
+    /// 导出单个预设到任意路径（原子写，覆盖已存在文件）
+    pub fn export_preset(&self, name: &str, path: &Path) -> io::Result<()> {
+        let preset = self
+            .presets
+            .get(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "预设不存在"))?;
+        Self::write_json_atomic(path, preset)
+    }
+
+    /// 从任意 JSON 文件导入为新预设。
+    /// 名字优先用 `name`，其次用文件名；非法或重名时自动回退/加序号。返回最终使用的名字。
+    pub fn import_preset(&mut self, path: &Path, name: Option<&str>) -> io::Result<String> {
+        let text = fs::read_to_string(path)?;
+        let preset: Preset = serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let fallback = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("导入预设")
+            .to_string();
+        let candidate = name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or(fallback);
+        let base = if validate_preset_name(&candidate).is_ok() {
+            candidate.trim().to_string()
+        } else {
+            "导入预设".to_string()
+        };
+        let mut final_name = base.clone();
+        let mut i = 2;
+        while self.presets.contains_key(&final_name) {
+            final_name = format!("{base}{i}");
+            i += 1;
+        }
+        self.save_preset(&final_name, &preset)?;
+        Ok(final_name)
     }
 }
 
@@ -1161,5 +1295,118 @@ mod tests {
         assert_eq!(g.ads_mode, AdsMode::HoldHide);
         assert_eq!(g.ads_button, AdsButton::LeftTrigger);
         assert_eq!(g.trigger_threshold, 30);
+    }
+
+    /// 热键 Display → parse 必须严格往返（否则预设 JSON 存下去就解析不回来）。
+    /// 这条断言覆盖 vk_to_key_token / key_token_to_vk 的**双向一致性**：
+    /// 之前 OEM 符号键只支持「解析」不支持「输出」，标点热键会写成 "Ctrl+?" 然后反序列化失败。
+    #[test]
+    fn hotkey_display_parse_roundtrip() {
+        let vks: [u32; 32] = [
+            0x70, 0x87, 0x41, 0x5A, 0x30, 0x39, 0x20, 0x09, 0x0D, 0x1B, 0x08, 0x2E, 0x2D, 0x24,
+            0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0xBD, 0xBB, 0xDB, 0xDD, 0xDC, 0xBA, 0xDE,
+            0xBC, 0xBE, 0xBF, 0xC0,
+        ];
+        for vk in vks {
+            let hk = Hotkey { modifiers: MOD_CONTROL | MOD_SHIFT, vk };
+            let text = hk.to_string();
+            assert!(!text.contains('?'), "vk {vk:#x} 未映射: {text}");
+            assert_eq!(Hotkey::parse(&text), Some(hk), "vk {vk:#x} 往返失败: {text}");
+        }
+        // 无修饰键也要能往返
+        let hk = Hotkey { modifiers: MOD_NONE, vk: 0x42 };
+        assert_eq!(Hotkey::parse(&hk.to_string()), Some(hk));
+    }
+
+    #[test]
+    fn preset_name_validation() {
+        for ok in ["apex", "Apex 2", "CS2-绿十字", "a.b"] {
+            assert!(validate_preset_name(ok).is_ok(), "应合法: {ok}");
+        }
+        for bad in ["", "   ", "../app", "a/b", "a\\b", "x:", "nul", "CON", "x.", "x ", &"字".repeat(41)] {
+            assert!(validate_preset_name(bad).is_err(), "应非法: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn save_preset_rejects_escaping_name() {
+        let dir = temp_dir("traversal");
+        let mut store = PresetStore::open(&dir).unwrap();
+        assert!(store.save_preset("../escaped", &Preset::default()).is_err());
+        assert!(store.save_preset("..\\escaped", &Preset::default()).is_err());
+        // 配置目录之外不得出现文件
+        let outside = dir.parent().unwrap().join("escaped.json");
+        assert!(!outside.exists(), "越界写入: {}", outside.display());
+        // 删除同样受保护（不能删到目录外的 app.json）
+        assert!(!store.delete_preset("..").unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_and_rename_preset() {
+        let dir = temp_dir("duprename");
+        let mut store = PresetStore::open(&dir).unwrap();
+        let mut p = Preset::default();
+        p.size = 33.0;
+        store.save_preset("apex", &p).unwrap();
+
+        assert_eq!(store.duplicate_preset("apex").unwrap(), "apex 副本");
+        assert_eq!(store.duplicate_preset("apex").unwrap(), "apex 副本2");
+        assert_eq!(store.get("apex 副本").unwrap().size, 33.0);
+
+        assert!(store.rename_preset("apex", "apex-pro").unwrap());
+        assert!(store.get("apex-pro").is_some());
+        assert!(store.get("apex").is_none());
+        assert_eq!(store.preset_names().iter().filter(|n| n.starts_with("apex")).count(), 3);
+
+        // 默认预设不可改名；重名目标被拒绝
+        assert!(!store.rename_preset("default", "whatever").unwrap());
+        assert!(!store.rename_preset("apex-pro", "apex 副本").unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_migrates_game_bindings() {
+        let dir = temp_dir("renamebind");
+        let mut store = PresetStore::open(&dir).unwrap();
+        store.save_preset("apex", &Preset::default()).unwrap();
+        store.app.last_preset = "apex".into();
+        store.app.game_bindings.push(GameBinding { exe: "r5apex.exe".into(), preset: "apex".into() });
+
+        assert!(store.rename_preset("apex", "apex2").unwrap());
+        assert_eq!(store.app.game_bindings[0].preset, "apex2");
+        assert_eq!(store.active_name(), "apex2");
+        // 重新打开后仍一致（绑定与激活名都已落盘）
+        let reopened = PresetStore::open(&dir).unwrap();
+        assert_eq!(reopened.app.game_bindings[0].preset, "apex2");
+        assert_eq!(reopened.active_name(), "apex2");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_import_roundtrip() {
+        let dir = temp_dir("exportimport");
+        let mut store = PresetStore::open(&dir).unwrap();
+        let mut p = Preset::default();
+        p.shape = Shape::Gate;
+        p.color = "#123456".into();
+        p.gamepad.ads_mode = AdsMode::Toggle;
+        store.save_preset("gate", &p).unwrap();
+
+        let out = dir.join("exported.json");
+        store.export_preset("gate", &out).unwrap();
+        assert!(out.exists());
+
+        assert_eq!(store.import_preset(&out, Some("imported")).unwrap(), "imported");
+        let back = store.get("imported").unwrap();
+        assert_eq!(back.color, "#123456");
+        assert_eq!(back.shape, Shape::Gate);
+        assert_eq!(back.gamepad.ads_mode, AdsMode::Toggle);
+        // 重名自动加序号；名字省略时取文件名
+        assert_eq!(store.import_preset(&out, Some("imported")).unwrap(), "imported2");
+        assert_eq!(store.import_preset(&out, None).unwrap(), "exported");
+        // 非法名字回退到默认名而不是失败
+        assert_eq!(store.import_preset(&out, Some("../x")).unwrap(), "导入预设");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

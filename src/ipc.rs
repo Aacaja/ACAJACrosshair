@@ -7,7 +7,9 @@
 //! - UI 进程 2 秒自检主进程窗口：主进程退出则 UI 自动退出
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SendMessageW, WM_COPYDATA};
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowW, SendMessageTimeoutW, SendMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK, WM_COPYDATA,
+};
 
 /// 主进程消息窗口标题（唯一标识，FindWindow 依据）
 pub const BACKEND_WINDOW_TITLE: &str = "ACAJABackend";
@@ -50,6 +52,36 @@ pub fn send_json(hwnd: HWND, tag: usize, json: &str) -> bool {
         )
     };
     true
+}
+
+/// **带超时**的同步发送：拖动滑杆时的「实时预览」用。
+///
+/// 与 [`send_json`] 的差别：`SendMessageW` 在对端忙（例如托盘菜单的模态循环里）时会把发送方
+/// 一起拖住 → UI 界面冻结（这正是 v1.1.5 改成「手动点应用」的原因）。
+/// 这里用 `SendMessageTimeoutW` + 短超时：对端忙就放弃这一次实时预览（用户松手点「应用」时
+/// 仍会走文件兜底通道），界面永远不会卡死。
+///
+/// 主程序侧成本：一次 WM_COPYDATA 处理 + 一次准星重绘，无新增线程/轮询（符合轻量铁律）。
+pub fn send_json_timeout(hwnd: HWND, tag: usize, json: &str, timeout_ms: u32) -> bool {
+    let bytes = json.as_bytes();
+    let cds = CopyDataStruct {
+        dwData: tag,
+        cbData: bytes.len() as u32,
+        lpData: bytes.as_ptr() as *const std::ffi::c_void,
+    };
+    let mut out: usize = 0;
+    let res = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_COPYDATA,
+            WPARAM(0),
+            LPARAM(&cds as *const CopyDataStruct as isize),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            timeout_ms,
+            Some(&mut out),
+        )
+    };
+    res.0 != 0
 }
 
 /// 组装「预设+可见性」负载 JSON
