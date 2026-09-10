@@ -1,85 +1,102 @@
 # ACAJA — Crosshair Overlay for Windows
 
-> **Current version v1.0.1**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
+> **Current version v1.1.7**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
+> Maintainers: see [AGENTS.md](AGENTS.md) (architecture map, how to verify, known pitfalls) and [WORKLOG.md](WORKLOG.md) (change log).
 
 ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` + Direct2D + egui) — a complete rewrite of [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN) (Python/PySide6). Click-through, zero runtime dependencies.
 
-**Key improvements over the Python version**: ~8 MB exe (was 46 MB), event-driven crosshair-sized overlay (≈0% CPU idle), Direct2D GPU rendering, 14 shapes with quad-color support, modern egui settings window, gamepad ADS support, per-game auto presets.
+**Key improvements over the Python version**: ~8 MB exe (was 46 MB), event-driven crosshair-sized overlay (≈0% CPU idle), Direct2D GPU rendering, **22 shapes** with quad-color support, modern egui settings window, gamepad ADS support, per-game auto presets.
 
 ---
 
 # 📖 User Guide
 
 ## 1. Download & Run
-1. Grab `ACAJA-v1.0.1-x64.exe` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or latest Actions artifact).
-2. Double-click. You get: the **settings window** (dark UI), a **red cross** at screen center (default), and a **tray icon**.
+1. Grab `ACAJA-v1.1.7-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
+2. Unzip and run `acaja.exe`. You get: the **settings window** (dark UI), a **red cross** at screen center (default), and a **tray icon**.
 3. Closing the settings window keeps the app running — the crosshair stays, tray controls everything.
 
-> Troubleshoot via log: `%APPDATA%/ACAJACrosshair/acaja.log`
+> ⚠️ **Both exes must sit in the same folder**: `acaja.exe` (backend) and `acaja-ui.exe` (settings window).
+> If only the backend was copied, "Open settings" reports that `acaja-ui.exe` is missing.
 
 ## 2. Customizing the crosshair
-Everything is edited in the settings window and applies **live** to the preview and the on-screen crosshair:
+The settings window has a left-hand section nav, content cards on the right, and a sticky "Apply to main program" bar at the bottom. Everything applies **live**:
 
-- **Shape & Style**: 14 shapes (cross, dot, square, circle, hollow cross/square/+dot, chevron, triangle, V, T, brackets, gap hair, custom image), size, thickness, opacity, rotation, **multicolor quad mode** (independent top/bottom/left/right colors), hollow gap, center dot, outline.
-- **Dynamic**: fire spread (px), recovery speed (ms/px), recoil indicator.
-- **Position**: center button, X/Y fine-tune, monitor index (multi-monitor).
-- **Custom image**: path + scale (select the Custom Image shape first).
-- **Hotkey**: toggle hotkey (e.g. `Ctrl+F1`), right-click toggle modes.
-- **Gamepad**: ADS mode (Hold-hide / Toggle / Hold-show / Off), trigger (LT/R2), threshold 0-255 (default 30), fire-spread on RT.
-- **Presets**: save / create (clone) / delete / switch.
+| Section | What you can do |
+|---|---|
+| **Style** | Live preview, 8 style templates (Apex/Valorant/CS2/sniper…), **22 shapes**, size, thickness, opacity, rotation, **multicolor quad mode**, hollow gap, center dot, outline |
+| **Dynamic** | Fire spread (px), recovery speed (ms/px), recoil indicator |
+| **Position** | Center button, X/Y fine-tune, monitor index, **snap to foreground window** |
+| **Gamepad** | ADS mode (Hold-hide / Toggle / Hold-show / Off), trigger (triggers or LB/RB bumpers), threshold 0-255, fire-spread on RT |
+| **Hotkeys** | Toggle hotkey, **next-preset hotkey**, right-click modes |
+| **Image** | Custom PNG path + scale (select the Custom Image shape first) |
+| **Presets** | Save / create (clone) / delete / switch presets, plus the **game-binding editor** (foreground app → preset) |
+| **System** | Start with Windows (per-user registry Run key) |
 
-Workflow: tweak → **Save Preset** → done. Unsaved changes live in memory only.
+Workflow: tweak → **Apply to main program** (or just close the window — it saves automatically).
 
 ## 3. Gamepad (Apex and similar)
 1. Connect a gamepad (Xbox-lineage native; PS pads need DS4Windows).
-2. Gamepad section → ADS mode: **Hold-hide** (recommended): hold LT/L2 → crosshair hides; release → shows. **Toggle** per pull; **Hold-show** reversed; **Off** disables.
-3. RT fire drives the dynamic spread if enabled.
+2. Gamepad section → ADS mode: **Hold-hide** (recommended): hold the aim input → crosshair hides; release → shows. **Toggle** per pull; **Hold-show** reversed; **Off** disables.
+3. Trigger source: left/right trigger (analog, threshold-based) or LB/RB bumpers (digital).
+4. RT fire drives the dynamic spread if enabled.
 
 ## 4. Per-game auto profiles
-When the foreground window switches to a bound game exe, ACAJA auto-loads that game's preset. Edit `%APPDATA%/ACAJACrosshair/app.json`:
+When the foreground window switches to a bound game exe, ACAJA auto-loads that game's preset.
+
+Configure it in the UI (Presets → Game bindings: type the process name, pick a preset, "Add binding"), or edit `%APPDATA%/ACAJACrosshair/app.json` directly:
 
 ```json
 { "game_bindings": [ { "exe": "r5apex.exe", "preset": "apex" } ] }
 ```
 
-(exe case-insensitive; preset files live in `%APPDATA%/ACAJACrosshair/presets/`)
+(exe name is case-insensitive; preset files live in `%APPDATA%/ACAJACrosshair/presets/`)
 
 ## 5. Global hotkeys
-Enter `Ctrl+F1`-style strings in the Hotkey section (Ctrl/Alt/Shift/Win + F1-F24/letters/digits/Space). Each preset stores its own hotkeys; toggle & next-preset hotkeys work in-game.
+Two fields in the Hotkeys section: **toggle crosshair** and **next preset**. Format: `Ctrl+F1`-style (Ctrl/Alt/Shift/Win + F1-F24/letters/digits/Space). Each preset stores its own hotkeys; registration happens as soon as you save (a combination already owned by another app is ignored).
 
 ## 6. Tray
 - Double-click tray icon: show/hide crosshair.
-- Right-click: menu (toggle / open settings / quit).
-- Closing the settings window does NOT quit. Trays **Quit** exits.
+- Right-click: menu (toggle / open settings / quit) — labels follow the UI language.
+- Closing the settings window does NOT quit. Tray **Quit** (or the settings' "Quit main program") exits.
 
 ## 7. Legacy migration
 First run auto-migrates legacy CrossHairLIN configs from `%APPDATA%/CrosshairApp/` (full field mapping); the old folder is kept.
 
 ## 8. FAQ
-- Crosshair missing? Check tray icon still exists → double-click to re-show; check the log.
-- Covered in the game? Use **borderless windowed** mode. Exclusive fullscreen (D3D) can never be overlaid by any overlay tool.
-- Gamepad unresponsive? XInput mode required; PS pads via DS4Windows; lower the threshold.
+- **Crosshair missing?** Check the tray icon still exists → double-click to re-show; check the log.
+- **"acaja-ui.exe not found" when opening settings?** Keep both exes in the same folder.
+- **Tray menu unresponsive / won't dismiss?** Fixed in v1.1.7 (the host window is made foreground before the menu is shown).
+- **Backend occasionally errored out and died?** Since v1.1.7 internal errors are caught, the crosshair recovers automatically, and a crash log is always written to `%APPDATA%/ACAJACrosshair/acaja-crash.log` — please report that file if it keeps happening.
+- **Covered in the game?** Use **borderless windowed** mode. Exclusive fullscreen (D3D) can never be overlaid by any overlay tool.
+- **Gamepad unresponsive?** XInput mode required; PS pads via DS4Windows; lower the threshold.
+- **Need verbose logs?** Run `acaja.exe --diag` → `%APPDATA%/ACAJACrosshair/acaja-diag.log`.
 
 ---
 
-# Architecture
+# Architecture (two processes since v1.1.0)
 
 ```
-Main thread   egui settings window (required on main thread since v1.0.1)
-Msg thread    Win32 message pump (tray / hotkeys / RawInput / foreground / gamepad events)
-Render thread D2D overlay (event-driven, blocks when idle)
-Gamepad thread XInput polling (250 Hz)
+Backend shell (acaja.exe, ~15 MB resident, no UI framework)
+├── render thread  : D2D overlay (event-driven, blocks when idle ≈0% CPU)
+├── message thread : Win32 pump (tray / hotkeys / RawInput mouse / foreground hook / gamepad events)
+└── gamepad thread : XInput polling (125 Hz)
+
+Settings process (acaja-ui.exe, launched on demand, fully released on close)
+└── egui window; parameters pushed live to the backend via WM_COPYDATA
 ```
 
 ```
 src/
-├── main.rs        # entry + message-thread wiring
-├── config.rs      # preset schema, atomic JSON, legacy migration, hotkey parser
-├── overlay/       # D2D renderer (14 shapes, quad colors, outline, rotation, spread, images)
-├── input/         # XInput gamepad + RawInput mouse
-├── system/        # tray / hotkey / foreground detect / monitors / autostart
-├── ui/            # egui settings window (preview, i18n, themes, presets)
-└── state.rs       # ADS state machine, preset cycling
+├── bin/backend.rs  # backend entry (overlay/tray/hotkeys/input/main message loop)
+├── bin/ui.rs       # settings entry (single instance + backend liveness check)
+├── ipc.rs          # cross-process WM_COPYDATA payload
+├── config.rs       # preset schema, atomic JSON, legacy migration, hotkey parser
+├── overlay/        # D2D renderer (22 shapes, quad colors, outline, rotation, spread, images)
+├── input/          # XInput gamepad + RawInput mouse
+├── system/         # tray / hotkey / foreground detect / monitors / autostart
+├── ui/             # egui settings window (preview, i18n, themes, presets, bindings)
+└── state.rs        # ADS state machine, preset cycling, position resolution
 ```
 
 ## Requirements
@@ -87,8 +104,10 @@ src/
 
 ## Roadmap
 - [x] S0–S5 complete (see README_CN for details)
-- [x] **v1.0.1** fix: settings window not showing (egui moved to main thread)
-- [ ] **v1.1**: tray "open settings" re-launch, autostart UI toggle, game-binding editor, image file picker
+- [x] **v1.1.x** two-process split, nav-based UI redesign
+- [x] **v1.1.7** blank nav labels fixed; autostart toggle, game-binding editor, snap toggle, next-preset hotkey;
+      always-on crash log + panic containment (see WORKLOG)
+- [ ] Backlog: image file picker; exclusive-fullscreen support (OS limitation, effectively impossible)
 
 ## License
 MIT. Original author: 林晓CCC — Bilibili: https://space.bilibili.com/622769073
