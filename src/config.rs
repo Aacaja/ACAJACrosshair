@@ -195,8 +195,8 @@ impl Hotkey {
 fn key_token_to_vk(token: &str) -> Option<u32> {
     let upper = token.to_ascii_uppercase();
     match upper.as_str() {
-        // F1-F24
-        t if t.len() == 2 && t.starts_with('F') => {
+        // F1-F24：注意 F10 及以上是 3 个字符，只判 len==2 会让 F10-F24 无法解析回来
+        t if (t.len() == 2 || t.len() == 3) && t.starts_with('F') => {
             let n: u32 = t[1..].parse().ok()?;
             if (1..=24).contains(&n) {
                 Some(0x70 + n - 1)
@@ -720,6 +720,10 @@ pub fn validate_preset_name(name: &str) -> Result<(), &'static str> {
     if n.is_empty() {
         return Err("预设名不能为空");
     }
+    if name.ends_with(' ') || name.ends_with('.') {
+        // Windows 文件名不允许以空格/点结尾；直接拒绝比静默裁剪可预期
+        return Err("预设名不能以空格或点结尾");
+    }
     if n.chars().count() > 40 {
         return Err("预设名过长（最多 40 个字符）");
     }
@@ -729,7 +733,7 @@ pub fn validate_preset_name(name: &str) -> Result<(), &'static str> {
     if n.chars().any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')) {
         return Err("预设名不能包含 \\ / : * ? \" < > |");
     }
-    if n == "." || n == ".." || n.ends_with('.') || n.ends_with(' ') {
+    if n == "." || n == ".." {
         return Err("预设名不能以点或空格结尾");
     }
     // Windows 保留设备名（不区分大小写，忽略扩展名部分）
@@ -833,8 +837,9 @@ impl PresetStore {
     // ---- 写操作 ----
 
     pub fn save_preset(&mut self, name: &str, preset: &Preset) -> io::Result<()> {
-        let name = name.trim();
+        // 先校验**原始**输入（保留结尾空格/点等特征），再存裁剪后的名字
         validate_preset_name(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let name = name.trim();
         let path = self.dir.join(PRESETS_DIR).join(format!("{name}.json"));
         Self::write_json_atomic(&path, preset)?;
         self.presets.insert(name.to_string(), preset.clone());
@@ -903,9 +908,12 @@ impl PresetStore {
             return Ok(false);
         }
         let preset = self.presets.get(from).cloned().unwrap_or_default();
+        // 必须在 delete_preset **之前**记录：删除时若发现当前激活项是被删的那个，
+        // 会把 last_preset 改回 "default"，之后再判断就永远不成立（激活名丢失）。
+        let was_active = self.app.last_preset == from;
         self.save_preset(to, &preset)?;
         self.delete_preset(from)?;
-        if self.app.last_preset == from {
+        if was_active {
             let _ = self.activate(to);
         }
         let mut touched = false;
@@ -1302,8 +1310,13 @@ mod tests {
     /// 之前 OEM 符号键只支持「解析」不支持「输出」，标点热键会写成 "Ctrl+?" 然后反序列化失败。
     #[test]
     fn hotkey_display_parse_roundtrip() {
-        let vks: [u32; 32] = [
-            0x70, 0x87, 0x41, 0x5A, 0x30, 0x39, 0x20, 0x09, 0x0D, 0x1B, 0x08, 0x2E, 0x2D, 0x24,
+        let vks: [u32; 35] = [
+            0x70, // F1
+            0x79, // F10（3 字符 token：曾因只判 len==2 而无法解析）
+            0x7A, // F11
+            0x7B, // F12
+            0x87, // F24
+            0x41, 0x5A, 0x30, 0x39, 0x20, 0x09, 0x0D, 0x1B, 0x08, 0x2E, 0x2D, 0x24,
             0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0xBD, 0xBB, 0xDB, 0xDD, 0xDC, 0xBA, 0xDE,
             0xBC, 0xBE, 0xBF, 0xC0,
         ];
@@ -1380,6 +1393,12 @@ mod tests {
         let reopened = PresetStore::open(&dir).unwrap();
         assert_eq!(reopened.app.game_bindings[0].preset, "apex2");
         assert_eq!(reopened.active_name(), "apex2");
+
+        // 非激活预设改名不应影响当前激活项
+        let mut store = reopened;
+        store.save_preset("other", &Preset::default()).unwrap();
+        assert!(store.rename_preset("other", "other2").unwrap());
+        assert_eq!(store.active_name(), "apex2");
         let _ = fs::remove_dir_all(&dir);
     }
 
