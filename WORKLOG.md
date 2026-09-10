@@ -1,6 +1,8 @@
 # ACAJA 开发日志（Worklog）
 
 > 本文件是项目开发进度的事实记录。新 agent 接入时先读 `AGENTS.md`（项目导航）+ 此文件 + `README.md`。
+> **发版规则**（v1.1.7 起）：每次更新完成、CI 变绿后**立即按版本顺序发 Release**（`git tag vX.Y.Z && git push origin --tags`），
+> 流程与注意事项见 `AGENTS.md` §2.1。
 
 ---
 
@@ -62,7 +64,21 @@
 
 验证证据：commit b985194（UI/i18n）→ 5116d31（后台硬化）→ d334f8f（单测修复）→ d5c4995（parking_lot）→ 6b1e209（文档）；
 GitHub Actions **success**，`test result: ok. 48 passed; 0 failed`，Windows release 构建通过。
-本地 `cargo check --all-targets --target x86_64-pc-windows-msvc` 零告警（并已用「故意注入类型错误」验证该通道真能报错）。
+本地 `cargo check --all-targets --target x86_64-pc-windows-msvc` 通过（并已用「故意注入类型错误」验证该通道真能报错）；
+注：本机 toolchain 较旧，**未覆盖新版 lint**，告警情况以下方第二轮补充的 CI 结论为准。
+
+补充（同日 · 第二轮）：
+- **f32 回退 lint 修复**：CI 报 14 处 `egui::Stroke::new(1.0, …)` —— `impl Into<f32>` 参数收到未标注浮点字面量，
+  新版 rustc 报 `falling back to f32 as the trait bound f32: From<f64> is not satisfied`（**将来会变成硬错误**），
+  全部改为 `1.0_f32`。
+- **排查失误记录（值得记住）**：一度误判「零告警」，两个原因 —— ① 筛告警用 `^warning`（行首），
+  而 `--message-format short` 的格式是 `文件:行:列: warning: …`，全部漏掉；② `gh run view --log` 会把转义符写成
+  **字面量 `^[`**（不是 ESC 字节），不先替换就匹配不到 `-->` 位置行。
+  另：本机 rustc（1.92.0，2025-12）比 CI 的 stable 旧 → **新版 lint 只在 CI 出现**，「本机零告警」不等于干净。
+- **发版规则落地**：`AGENTS.md` 新增 §2.1（每次更新完成、CI 变绿后立即按序打 tag 发 Release）；本轮按该规则发 v1.1.7。
+- **旧版 Python 产物下线**：取消跟踪 `小林の准星.exe`（48MB）与 7 个 PySide6 源码 + `requirements.txt`
+  （用户确认无保留价值）；跟踪文件 49 → 40。`.git` 仍 111MB（旧 blob 在历史与 v1.0.x/v1.1.x tag 中，
+  需重写历史才能释放，另行决策）。
 
 边界与待用户实测：
 - 用户那台机器上「偶尔卡掉」的**具体触发路径无法在 macOS 复现**（无 Windows 运行环境）：本轮做的是

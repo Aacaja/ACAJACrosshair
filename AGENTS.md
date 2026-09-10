@@ -39,13 +39,37 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
    ```sh
    T=~/.rustup/toolchains/stable-aarch64-apple-darwin
    RUSTC=$T/bin/rustc ACAJA_SKIP_WINRES=1 \
-     "$T/bin/cargo" check --all-targets --target x86_64-pc-windows-msvc
+     "$T/bin/cargo" check --all-targets --target x86_64-pc-windows-msvc \
+     --message-format short 2>&1 | grep ': warning'
    ```
    - 需要该 toolchain 里有 `x86_64-pc-windows-msvc` 的 rust-std（`lib/rustlib/x86_64-pc-windows-msvc`）。
    - `ACAJA_SKIP_WINRES=1` 让 `build.rs` 跳过图标/版本资源嵌入（macOS 上没有 `rc.exe`）。
    - 能查：类型、借用、未使用导入/变量/字段等告警；**不能**查：链接、运行期行为、GUI。
+   - ⚠️ **本机 rustc 可能比 CI 的 stable 旧**（本机 1.92.0 / CI 用最新 stable）：**新版本的 lint 只在 CI 出现**。
+     实例：`falling back to f32 as the trait bound f32: From<f64> is not satisfied` —— 根因是
+     `egui::Stroke::new(1.0, …)` 这种 `impl Into<f32>` 参数收到未标注浮点字面量（将来会变成硬错误），写成
+     `1.0_f32` 即可。**「本机零告警」不等于干净，最终以 CI 日志为准。**
+   - 解析 `gh run view --log` 的坑：转义符会被写成**字面量 `^[`**（不是 ESC 字节），直接正则匹配 `-->` 会失败，
+     先 `text.replace("^[", "\x1b")` 再去 ANSI；筛告警要用 `grep ': warning'`（`--message-format short`
+     输出格式是 `文件:行:列: warning: …`，用 `^warning` 会全部漏掉）。
 3. 不要提交 `Cargo.lock`（已在 `.gitignore`）。
 4. 用户的实机反馈是**最高优先级证据**；没有实机证据时，结论要标注为推断。
+
+## 2.1 发版规则（**每次更新都要做，不要攒**）
+
+每次更新（功能/修复/重构）完成、CI 变绿后，**立即按版本顺序发一个 Release**：
+
+1. 升 `Cargo.toml` 的 `version` —— 严格递增、不跳号、不复用已发过的号（当前 → v1.1.7 → v1.1.8 → …）；
+2. 同步 `WORKLOG.md`（写清验证证据）与 README 里的版本号；
+3. 提交并推 tag，CI 自动发版：
+   ```sh
+   git tag vX.Y.Z && git push origin main --tags
+   ```
+   `.github/workflows/build.yml` 的 `Publish release (tag only)` 步骤会创建 Release，
+   资产 = `acaja.exe` / `acaja-ui.exe` / `ACAJA-vX.Y.Z-x64.zip` / `README.md` / `README_CN.md`；
+4. 确认结果：`gh release list --limit 3`、
+   `gh release view vX.Y.Z --json assets -q '.assets[].name'`（应看到 5 个资产）；
+5. **已发布的 tag 不再移动或重打**（会让 Release 与代码不一致）；发错了就补一个更高的版本号。
 
 ## 3. 代码约定
 

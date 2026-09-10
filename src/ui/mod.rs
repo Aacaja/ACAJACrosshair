@@ -160,7 +160,7 @@ impl AcajaApp {
         visuals.faint_bg_color = Color32::from_rgb(24, 26, 33);
         visuals.override_text_color = Some(Color32::from_rgb(229, 231, 237));
         visuals.selection.bg_fill = ACCENT;
-        visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+        visuals.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
         visuals.widgets.noninteractive.bg_fill = CARD_BG;
         visuals.widgets.noninteractive.weak_bg_fill = CARD_BG;
         // 弱底色（按钮 / 输入框 / 滑杆槽）：比卡片略深一档 → 内嵌层次
@@ -171,11 +171,11 @@ impl AcajaApp {
         visuals.widgets.active.bg_fill = ACCENT_SOFT;
         visuals.widgets.active.weak_bg_fill = ACCENT_SOFT;
         // 控件描边 + 圆角统一（按钮 / 下拉 / 勾选框 / 滑杆把手）
-        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, BORDER);
-        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, BORDER);
-        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, ACCENT);
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT_BRIGHT);
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, ACCENT);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, ACCENT_BRIGHT);
         let wround = Rounding::same(6.0);
         visuals.widgets.noninteractive.rounding = wround;
         visuals.widgets.inactive.rounding = wround;
@@ -306,7 +306,7 @@ impl AcajaApp {
             ui.painter().rect_stroke(
                 rect,
                 Rounding::same(6.0),
-                egui::Stroke::new(1.0, ACCENT_BRIGHT),
+                egui::Stroke::new(1.0_f32, ACCENT_BRIGHT),
             );
             ui.painter().text(
                 rect.center(),
@@ -445,7 +445,7 @@ impl AcajaApp {
         let painter = ui.painter();
         // 卡片底色 + 细边框（与内容卡片同一视觉语言）
         painter.rect_filled(rect, Rounding::same(10.0), CARD_BG);
-        painter.rect_stroke(rect, Rounding::same(10.0), egui::Stroke::new(1.0, BORDER));
+        painter.rect_stroke(rect, Rounding::same(10.0), egui::Stroke::new(1.0_f32, BORDER));
 
         let inner = rect.shrink2(egui::vec2(14.0, 8.0));
         let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(Align::Center)));
@@ -490,7 +490,7 @@ impl AcajaApp {
             let apply = ui.add(
                 egui::Button::new(RichText::new(t(self.lang, "push_apply")).size(13.5).strong())
                     .fill(ACCENT)
-                    .stroke(egui::Stroke::new(1.0, ACCENT_BRIGHT))
+                    .stroke(egui::Stroke::new(1.0_f32, ACCENT_BRIGHT))
                     .min_size(egui::vec2(150.0, 30.0)),
             );
             let br = apply.rect;
@@ -502,12 +502,12 @@ impl AcajaApp {
             ui.painter().hline(
                 Rangef::new(br.left() + 5.0, br.right() - 5.0),
                 br.top() + 1.5,
-                egui::Stroke::new(1.0, hl),
+                egui::Stroke::new(1.0_f32, hl),
             );
             ui.painter().hline(
                 Rangef::new(br.left() + 5.0, br.right() - 5.0),
                 br.bottom() - 1.5,
-                egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(2, 32, 72, 110)),
+                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(2, 32, 72, 110)),
             );
             if apply.clicked() {
                 self.push_to_backend();
@@ -520,7 +520,7 @@ impl AcajaApp {
         let frame = egui::Frame::none()
             .fill(CARD_BG)
             .rounding(Rounding::same(10.0))
-            .stroke(egui::Stroke::new(1.0, BORDER))
+            .stroke(egui::Stroke::new(1.0_f32, BORDER))
             .inner_margin(Margin::same(14.0));
         frame.show(ui, |ui| {
             // 行距节奏统一：行间 9px
@@ -1102,7 +1102,7 @@ impl eframe::App for AcajaApp {
                 ui.painter().vline(
                     nav_rect.right() + 6.0,
                     nav_rect.y_range(),
-                    egui::Stroke::new(1.0, BORDER),
+                    egui::Stroke::new(1.0_f32, BORDER),
                 );
 
                 let content_rect = egui::Rect::from_min_max(
@@ -1249,7 +1249,7 @@ fn color_row_ui(
         let (r, g, b) = crate::overlay::parse_hex(target);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 20.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, Rounding::same(6.0), Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8));
-        ui.painter().rect_stroke(rect, Rounding::same(6.0), egui::Stroke::new(1.0, BORDER));
+        ui.painter().rect_stroke(rect, Rounding::same(6.0), egui::Stroke::new(1.0_f32, BORDER));
         let resp = ui.add(
             TextEdit::singleline(buf)
                 .hint_text("#RRGGBB")
