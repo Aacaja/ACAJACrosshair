@@ -10,12 +10,13 @@
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{HBITMAP, HDC};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NOTIFYICONDATAW, NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_MESSAGE, NIF_ICON,
-    NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, LoadImageW, TrackPopupMenu, HICON, IMAGE_ICON,
-    LR_DEFAULTSIZE, LR_LOADFROMFILE, MF_STRING, TPM_RETURNCMD,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, LoadImageW, PostMessageW, SetForegroundWindow,
+    TrackPopupMenu, HICON, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, MF_STRING, TPM_RETURNCMD,
+    WM_NULL,
 };
 
 /// 托盘回调消息（挂在宿主窗口上）
@@ -91,19 +92,35 @@ impl Tray {
     }
 
     /// 弹出托盘右键菜单（在宿主窗口消息线程调用）。返回用户选择的命令 id。
-    pub fn popup_menu(&mut self, anchor_x: i32, anchor_y: i32, hwnd: HWND) -> Option<usize> {
+    ///
+    /// `labels` = [显示/隐藏, 打开设置, 退出]（由调用方按当前语言提供）。
+    ///
+    /// MSDN 的经典要求：弹菜单前必须把宿主窗口设为前台窗口，否则菜单可能
+    /// 收不到输入、点别处也不消失（用户看到的就是「托盘卡住」）；关闭后再
+    /// PostMessage(WM_NULL) 收尾，避免菜单残留。
+    pub fn popup_menu(
+        &mut self,
+        anchor_x: i32,
+        anchor_y: i32,
+        hwnd: HWND,
+        labels: [&str; 3],
+    ) -> Option<usize> {
         unsafe {
             let menu = CreatePopupMenu().ok()?;
             let items = [
-                (CMD_TOGGLE, "显示/隐藏准星\0"),
-                (CMD_SETTINGS, "打开设置\0"),
-                (CMD_QUIT, "退出\0"),
+                (CMD_TOGGLE, labels[0]),
+                (CMD_SETTINGS, labels[1]),
+                (CMD_QUIT, labels[2]),
             ];
             for (id, text) in items {
-                let wide: Vec<u16> = text.encode_utf16().collect();
+                // AppendMenuW 需要以 NUL 结尾的 UTF-16
+                let owned = format!("{text}\0");
+                let wide: Vec<u16> = owned.encode_utf16().collect();
                 let _ = AppendMenuW(menu, MF_STRING, id, windows::core::PCWSTR(wide.as_ptr()));
             }
+            let _ = SetForegroundWindow(hwnd);
             let cmd = TrackPopupMenu(menu, TPM_RETURNCMD, anchor_x, anchor_y, 0, hwnd, None);
+            let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
             if cmd.0 == 0 {
                 None

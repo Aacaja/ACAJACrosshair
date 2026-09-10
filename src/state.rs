@@ -31,7 +31,7 @@ pub struct AppState {
 /// | Toggle | 每次扣下（上升沿）切换一次 |
 /// | Off | 不介入 |
 pub fn apply_ads_event(state: &mut AppState, mode: AdsMode, ads: bool) -> bool {
-    let mut prev = state.visible;
+    let prev = state.visible;
     match mode {
         AdsMode::Off => return false,
         AdsMode::HoldHide => {

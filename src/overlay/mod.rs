@@ -42,11 +42,12 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, AC_SRC_ALPHA,
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS, HBRUSH, HBITMAP, HDC,
+    HGDIOBJ,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetSystemMetrics,
-    HCURSOR, HICON, HMENU, PeekMessageW, RegisterClassW, SetWindowPos, ShowWindow,
+    HCURSOR, HICON, PeekMessageW, RegisterClassW, SetWindowPos, ShowWindow,
     TranslateMessage, UpdateLayeredWindow, WNDCLASSW, WNDCLASS_STYLES, HWND_TOPMOST, MSG,
     PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
     SW_SHOWNOACTIVATE, ULW_ALPHA, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -100,14 +101,19 @@ impl OverlayHandle {
     }
 }
 
-/// 启动覆盖层渲染线程
-pub fn start() -> (OverlayHandle, JoinHandle<()>) {
+/// 启动覆盖层渲染线程。
+///
+/// 线程创建失败时返回 `None`（句柄依然可用，只是消息无人消费）：宁可没有准星，
+/// 也不该让一次线程创建失败把整个后台进程 panic 掉——发行版没有控制台，
+/// 用户看到的只是「报错后直接卡掉」。
+pub fn start() -> (OverlayHandle, Option<JoinHandle<()>>) {
     let (tx, rx) = unbounded();
     let handle = OverlayHandle { tx };
     let thread = std::thread::Builder::new()
         .name("acaja-overlay".into())
         .spawn(move || overlay_thread(rx))
-        .expect("spawn overlay thread");
+        .map_err(|e| warn!("覆盖层渲染线程创建失败: {e}"))
+        .ok();
     (handle, thread)
 }
 
@@ -121,6 +127,8 @@ struct Canvas {
     dc_target: ID2D1DCRenderTarget,
     hdc: HDC,
     hbmp: HBITMAP,
+    /// `create_dib` 换出的 DC 原位图：删除 DIB 前必须先把它换回来
+    stock_bmp: HGDIOBJ,
     #[allow(dead_code)]
     bits: *mut u8,
     w: u32,
@@ -188,11 +196,11 @@ fn overlay_thread(rx: Receiver<Msg>) {
 
         // 显隐同步
         if canvas.visible && !canvas.shown {
-            unsafe { ShowWindow(canvas.hwnd, SW_SHOWNOACTIVATE); }
+            let _ = unsafe { ShowWindow(canvas.hwnd, SW_SHOWNOACTIVATE) };
             canvas.shown = true;
             dirty = true;
         } else if !canvas.visible && canvas.shown {
-            unsafe { ShowWindow(canvas.hwnd, SW_HIDE); }
+            let _ = unsafe { ShowWindow(canvas.hwnd, SW_HIDE) };
             canvas.shown = false;
         }
 
@@ -456,6 +464,10 @@ fn fill_polygon(
     factory: &ID2D1Factory,
     pts: &[GeoPoint],
 ) -> Result<ID2D1PathGeometry, windows::core::Error> {
+    if pts.is_empty() {
+        // 空多边形会让下面的 pts[0] 越界 panic —— 渲染线程 panic = 准星静默消失
+        return Err(windows::core::Error::from(ERROR_INVALID_PARAMETER));
+    }
     let path = unsafe { factory.CreatePathGeometry()? };
     let sink = unsafe { path.Open()? };
     let sink: ID2D1SimplifiedGeometrySink = sink.cast()?;
@@ -539,11 +551,6 @@ fn slot_color(colors: &QuadColors, main: (f32, f32, f32), slot: u8) -> (f32, f32
         SLOT_MAIN => main,
         _ => main,
     }
-}
-
-/// 供 UI 预览复用的取色（与屏幕渲染严格一致）
-pub(crate) fn slot_color_pub(colors: &QuadColors, main: (f32, f32, f32), slot: u8) -> (f32, f32, f32) {
-    slot_color(colors, main, slot)
 }
 
 /// 解析 "#RRGGBB" → (r, g, b) 0.0-1.0；失败返回红色
@@ -653,7 +660,7 @@ fn create_canvas() -> Result<Canvas, windows::core::Error> {
         // 初始：置顶 + 不激活（HWND_TOPMOST 直接传，不要 Some）
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE).ok();
 
-        let (hdc, hbmp, bits, w, h) = create_dib(MIN_CANVAS, MIN_CANVAS)?;
+        let (hdc, hbmp, stock, bits, w, h) = create_dib(MIN_CANVAS, MIN_CANVAS)?;
 
         Ok(Canvas {
             hwnd,
@@ -661,6 +668,7 @@ fn create_canvas() -> Result<Canvas, windows::core::Error> {
             dc_target,
             hdc,
             hbmp,
+            stock_bmp: stock,
             bits,
             w,
             h,
@@ -676,11 +684,12 @@ fn create_canvas() -> Result<Canvas, windows::core::Error> {
     }
 }
 
-/// 32bpp 顶向下 DIB + 内存 DC
+/// 32bpp 顶向下 DIB + 内存 DC。
+/// 返回 `(dc, dib, 被换出的原位图, 像素指针, w, h)`——原位图必须在删除 DIB 前换回 DC。
 unsafe fn create_dib(
     w: u32,
     h: u32,
-) -> Result<(HDC, HBITMAP, *mut u8, u32, u32), windows::core::Error> {
+) -> Result<(HDC, HBITMAP, HGDIOBJ, *mut u8, u32, u32), windows::core::Error> {
     let mut bmi: BITMAPINFO = std::mem::zeroed();
     bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
     bmi.bmiHeader.biWidth = w as i32;
@@ -704,8 +713,11 @@ unsafe fn create_dib(
         let _ = DeleteObject(hbmp);
         return Err(windows::core::Error::from(ERROR_INVALID_HANDLE));
     }
-    SelectObject(hdc, hbmp);
-    Ok((hdc, hbmp, bits as *mut u8, w, h))
+    // SelectObject 返回被换出的默认位图。**删除本 DC 前必须把它换回来**：
+    // DeleteObject 对「已选入 DC 的位图」会失败，位图随之泄漏（每次画布尺寸变化
+    // 泄漏一张 32bpp DIB，最大 4MB —— 拖动「大小」滑杆就能把内存吃光）。
+    let stock = SelectObject(hdc, hbmp);
+    Ok((hdc, hbmp, stock, bits as *mut u8, w, h))
 }
 
 fn ensure_canvas_size(
@@ -714,18 +726,23 @@ fn ensure_canvas_size(
     h: u32,
 ) -> Result<(), windows::core::Error> {
     unsafe {
+        // 先把旧 DIB 从 DC 换出再删，否则 DeleteObject 失败 → 每次尺寸变化泄漏一张 DIB
+        if !canvas.hdc.is_invalid() && !canvas.stock_bmp.is_invalid() {
+            SelectObject(canvas.hdc, canvas.stock_bmp);
+        }
         if !canvas.hbmp.is_invalid() {
             let _ = DeleteObject(canvas.hbmp);
         }
         if !canvas.hdc.is_invalid() {
             let _ = DeleteDC(canvas.hdc);
         }
-        let (hdc, hbmp, bits, nw, nh) = create_dib(
+        let (hdc, hbmp, stock, bits, nw, nh) = create_dib(
             w.max(MIN_CANVAS).min(MAX_CANVAS),
             h.max(MIN_CANVAS).min(MAX_CANVAS),
         )?;
         canvas.hdc = hdc;
         canvas.hbmp = hbmp;
+        canvas.stock_bmp = stock;
         canvas.bits = bits;
         canvas.w = nw;
         canvas.h = nh;
@@ -747,11 +764,14 @@ unsafe extern "system" fn overlay_wnd_proc(
 impl Canvas {
     fn cleanup(&mut self) {
         unsafe {
-            if !self.hdc.is_invalid() {
-                let _ = DeleteDC(self.hdc);
+            if !self.hdc.is_invalid() && !self.stock_bmp.is_invalid() {
+                SelectObject(self.hdc, self.stock_bmp);
             }
             if !self.hbmp.is_invalid() {
                 let _ = DeleteObject(self.hbmp);
+            }
+            if !self.hdc.is_invalid() {
+                let _ = DeleteDC(self.hdc);
             }
             let _ = DestroyWindow(self.hwnd);
         }

@@ -10,7 +10,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use log::{info, warn};
@@ -18,7 +17,7 @@ use windows::Win32::Foundation::{GetLastError, HINSTANCE, HWND, ERROR_ALREADY_EX
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, PeekMessageW,
-    PostQuitMessage, RegisterClassW, TranslateMessage, WNDCLASSW, WNDCLASS_STYLES,
+    RegisterClassW, TranslateMessage, WNDCLASSW, WNDCLASS_STYLES,
     MSG, PM_REMOVE, WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_INPUT, WM_LBUTTONDBLCLK,
     WM_QUIT, WM_RBUTTONUP, WS_POPUP, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
@@ -27,12 +26,14 @@ use windows::core::{PCWSTR, w};
 use acaja::config::{migrate_legacy, Preset, PresetStore};
 use acaja::input::gamepad::{GameEvent, RuntimeGamepadCfg, start_gamepad};
 use acaja::input::raw_mouse::{RawMouseEvent, handle_raw_input, register_raw_mouse};
-use acaja::ipc::{self, BACKEND_WINDOW_TITLE, IPC_TAG_PRESET};
+use acaja::ipc::IPC_TAG_PRESET;
 use acaja::overlay::OverlayHandle;
 use acaja::state::{AppState, SharedPreset, apply_ads_event, next_preset, snap_position};
+use acaja::sync;
 use acaja::system::foreground::{FgEvent, start_fg_watcher};
 use acaja::system::hotkey::{HOTKEY_ID_NEXT_PRESET, HOTKEY_ID_TOGGLE, register as reg_hotkey, unregister as unreg_hotkey};
 use acaja::system::tray::{self, CMD_QUIT, CMD_SETTINGS, CMD_TOGGLE, Tray, WM_TRAYICON};
+use acaja::ui::strings::t;
 use acaja::{APP_NAME, VERSION};
 
 const MAIN_CLASS: PCWSTR = w!("ACAJAMainWindow");
@@ -64,7 +65,7 @@ struct FileWatch {
 
 impl MainState {
     fn preset(&self) -> Arc<Preset> {
-        self.shared.read().unwrap().preset.clone()
+        sync::read(&self.shared).preset.clone()
     }
 
     fn position_for_preset(&self) -> (i32, i32) {
@@ -81,15 +82,15 @@ impl MainState {
     /// 重载当前预设（激活/切换后），更新共享仓库与热键
     fn reload_preset(&mut self) {
         let preset: Arc<Preset> = {
-            let store = self.store.lock().unwrap();
+            let store = sync::lock(&self.store);
             Arc::new(store.get_active().clone())
         };
         {
-            let mut w = self.shared.write().unwrap();
+            let mut w = sync::write(&self.shared);
             w.preset = preset;
             w.version = w.version.wrapping_add(1);
         }
-        self.last_version = { self.shared.read().unwrap().version };
+        self.last_version = sync::read(&self.shared).version;
         self.apply_hotkeys();
         self.sync_gamepad_cfg();
         self.full_update();
@@ -109,11 +110,11 @@ impl MainState {
         let preset = Arc::new(preset);
         info!("IPC: 收到 UI 推送 shape={:?} visible={}", preset.shape, visible);
         {
-            let mut w = self.shared.write().unwrap();
+            let mut w = sync::write(&self.shared);
             w.preset = preset;
             w.version = w.version.wrapping_add(1);
         }
-        self.last_version = { self.shared.read().unwrap().version };
+        self.last_version = sync::read(&self.shared).version;
         self.app.visible = visible;
         self.apply_hotkeys();
         self.sync_gamepad_cfg();
@@ -122,7 +123,7 @@ impl MainState {
 
     fn sync_gamepad_cfg(&mut self) {
         let p = self.preset();
-        *self.gamepad_cfg.write().unwrap() = RuntimeGamepadCfg::from_preset(&p);
+        *sync::write(&self.gamepad_cfg) = RuntimeGamepadCfg::from_preset(&p);
     }
 
     fn apply_hotkeys(&mut self) {
@@ -158,7 +159,7 @@ impl MainState {
         // 预设名可能变了（app.json 的 last_preset）——先看 app.json
         if app_mtime != self.watched.app_mtime {
             self.watched.app_mtime = app_mtime;
-            let name = { self.store.lock().unwrap().active_name() };
+            let name = { sync::lock(&self.store).active_name() };
             if name != self.watched.preset_name {
                 self.watched.preset_name = name.clone();
                 info!("配置监控: 激活预设切换为 {name}");
@@ -189,11 +190,11 @@ impl MainState {
         };
         let preset = Arc::new(preset);
         {
-            let mut w = self.shared.write().unwrap();
+            let mut w = sync::write(&self.shared);
             w.preset = preset.clone();
             w.version = w.version.wrapping_add(1);
         }
-        self.last_version = { self.shared.read().unwrap().version };
+        self.last_version = sync::read(&self.shared).version;
         self.apply_hotkeys();
         self.sync_gamepad_cfg();
         self.full_update();
@@ -218,12 +219,12 @@ impl MainState {
 
     fn cycle_preset(&mut self) {
         let (names, current) = {
-            let store = self.store.lock().unwrap();
+            let store = sync::lock(&self.store);
             (store.preset_names(), store.active_name())
         };
         let next = next_preset(&current, &names);
         if next != current {
-            let ok = { self.store.lock().unwrap().activate(&next) };
+            let ok = { sync::lock(&self.store).activate(&next) };
             if ok {
                 info!("热键切到预设: {next}");
                 self.reload_preset();
@@ -371,20 +372,12 @@ fn spawn_ui_process() {
         }
     }
     warn!("未找到 acaja-ui.exe（查找过: {:?}）", candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
-    // 明确提示（发行版无日志，此提示是唯一反馈）
-    let text = format!(
-        "未找到设置程序 acaja-ui.exe\n\n请确认它与主程序放在同一目录，然后重试（托盘 → 打开设置）。"
+    // 明确提示（发行版无日志，此提示是唯一反馈）。必须用独立线程弹：
+    // 在主消息线程弹模态框会同时卡住托盘/热键/实时推送，用户现象就是「程序卡住」。
+    show_message_box(
+        "ACAJA 提示",
+        "未找到设置程序 acaja-ui.exe\n\n请确认它与主程序放在同一目录，然后重试（托盘 → 打开设置）。",
     );
-    let t16: Vec<u16> = "ACAJA 提示".encode_utf16().chain(std::iter::once(0)).collect();
-    let m16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
-            None,
-            windows::core::PCWSTR(m16.as_ptr()),
-            windows::core::PCWSTR(t16.as_ptr()),
-            windows::Win32::UI::WindowsAndMessaging::MB_OK,
-        );
-    }
 }
 
 // ===========================================================================
@@ -396,7 +389,7 @@ fn handle_fg_event(state: &mut MainState, fg: FgEvent) {
         FgEvent::Changed { exe, .. } => {
             state.fg_exe = exe.clone();
             let binding = {
-                let store = state.store.lock().unwrap();
+                let store = sync::lock(&state.store);
                 store
                     .app
                     .game_bindings
@@ -405,9 +398,9 @@ fn handle_fg_event(state: &mut MainState, fg: FgEvent) {
                     .map(|b| b.preset.clone())
             };
             if let Some(preset_name) = binding {
-                let current = { state.store.lock().unwrap().active_name() };
+                let current = { sync::lock(&state.store).active_name() };
                 if current != preset_name
-                    && state.store.lock().unwrap().activate(&preset_name)
+                    && sync::lock(&state.store).activate(&preset_name)
                 {
                     info!("前台 {exe} → 自动切换预设 {preset_name}");
                     state.reload_preset();
@@ -454,12 +447,19 @@ fn pump_message_batch(state: &mut MainState, quit: &Arc<AtomicBool>) -> bool {
                     if what == WM_LBUTTONDBLCLK {
                         state.toggle_visible();
                     } else if what == WM_RBUTTONUP || what == WM_CONTEXTMENU {
+                        // 菜单文案跟随 app.json 的语言设置（此前写死中文）
+                        let lang = sync::lock(&state.store).app.lang();
+                        let labels = [
+                            t(lang, "tray_toggle"),
+                            t(lang, "tray_settings"),
+                            t(lang, "tray_quit"),
+                        ];
                         let mut pt = windows::Win32::Foundation::POINT::default();
                         let _ = GetCursorPos(&mut pt);
                         let cmd = state
                             .tray
                             .as_mut()
-                            .and_then(|t| t.popup_menu(pt.x, pt.y, state.hwnd));
+                            .and_then(|t| t.popup_menu(pt.x, pt.y, state.hwnd, labels));
                         match cmd {
                             Some(CMD_TOGGLE) => state.toggle_visible(),
                             Some(CMD_SETTINGS) => spawn_ui_process(),
@@ -533,14 +533,90 @@ fn init_logging() -> Option<PathBuf> {
     Some(log_path)
 }
 
-fn backend_process_main() {
-    init_logging();
+/// 崩溃日志路径（`%APPDATA%/ACAJACrosshair/acaja-crash.log`）
+fn crash_log_path() -> Option<PathBuf> {
+    let dir = acaja::appdata_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("acaja-crash.log"))
+}
 
+/// 最近一次 panic 的文本（catch_unwind 之后取出来提示用户）
+static LAST_PANIC: Mutex<Option<String>> = Mutex::new(None);
+
+/// 安装 panic 钩子：**任何** panic 都落盘。
+///
+/// 发行版（windows_subsystem = "windows" + 默认不写日志）里 panic 是「静默死亡」，
+/// 用户只能看到「报错后直接卡掉」，开发者拿不到任何线索 —— 所以崩溃日志不走开关，
+/// 恒定写入 `acaja-crash.log`。
+fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("PANIC: {info}");
         log::error!("{msg}");
-        eprintln!("{msg}");
+        if let Some(path) = crash_log_path() {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                use std::io::Write;
+                let _ = writeln!(f, "[{:?}] {msg}", std::time::SystemTime::now());
+            }
+        }
+        if let Ok(mut slot) = LAST_PANIC.lock() {
+            *slot = Some(msg);
+        }
     }));
+}
+
+/// 弹窗提示：**必须**在独立线程里弹 —— 在主消息线程弹模态框会卡住托盘/热键/实时推送
+fn show_message_box(title: &str, text: &str) {
+    let t16: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let m16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    std::thread::spawn(move || unsafe {
+        windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+            None,
+            windows::core::PCWSTR(m16.as_ptr()),
+            windows::core::PCWSTR(t16.as_ptr()),
+            windows::Win32::UI::WindowsAndMessaging::MB_OK,
+        );
+    });
+}
+
+/// 消息循环的单次迭代（panic 隔离）：返回 (是否退出, 是否捕获到 panic)。
+///
+/// 一次消息处理 panic 不该让常驻准星进程消失；panic 详情已由 panic 钩子落盘，
+/// 这里只保证主循环继续存活（否则用户看到的就是「准星突然没了」）。
+fn run_message_iteration(state: &mut MainState) -> (bool, bool) {
+    let quit = quit_flag();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pump_message_batch(state, &quit)
+    })) {
+        Ok(exit_now) => (exit_now, false),
+        Err(_) => (false, true),
+    }
+}
+
+/// 捕获 panic 后的一次性提示（只在首次弹窗，避免反复打扰）
+fn report_caught_panic(count: u32) {
+    warn!("消息循环捕获到内部错误（第 {count} 次），已记录到崩溃日志");
+    if count > 1 {
+        return;
+    }
+    let detail = LAST_PANIC
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default();
+    let path = crash_log_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    show_message_box(
+        "ACAJA 内部错误（已自动恢复）",
+        &format!(
+            "检测到内部错误，准星已自动恢复运行。\n\n{detail}\n\n详细日志：\n{path}\n\n如反复出现，请把该日志反馈给开发者。"
+        ),
+    );
+}
+
+fn backend_process_main() {
+    init_logging();
+    install_panic_hook();
 
     info!("{} v{} 后台壳启动", APP_NAME, VERSION);
 
@@ -553,7 +629,9 @@ fn backend_process_main() {
         warn!("检测到已有实例在运行，本实例退出");
         return;
     }
-    std::mem::forget(mutex);
+    // 互斥体句柄故意不关闭：句柄是 Copy 类型、没有 Drop（进程退出时由系统回收），
+    // 这里保留它即可让单实例判定持续有效。
+    let _mutex_guard = mutex;
 
     // ---- 配置迁移 + 仓库 ----
     let appdata = match acaja::appdata_dir() {
@@ -580,13 +658,13 @@ fn backend_process_main() {
         }
     };
     let store = Arc::new(Mutex::new(store));
-    info!("当前预设：{}", store.lock().unwrap().active_name());
+    info!("当前预设：{}", sync::lock(&store).active_name());
 
     // ---- 覆盖层 ----
     let (overlay, overlay_thread) = acaja::overlay::start();
 
     // ---- 共享状态 ----
-    let initial_preset = Arc::new(store.lock().unwrap().get_active().clone());
+    let initial_preset = Arc::new(sync::lock(&store).get_active().clone());
     let shared: Arc<RwLock<SharedPreset>> = Arc::new(RwLock::new(SharedPreset {
         version: 1,
         preset: initial_preset.clone(),
@@ -594,7 +672,7 @@ fn backend_process_main() {
     let gamepad_cfg: Arc<RwLock<RuntimeGamepadCfg>> =
         Arc::new(RwLock::new(RuntimeGamepadCfg::from_preset(&initial_preset)));
 
-    let active_name = { store.lock().unwrap().active_name() };
+    let active_name = { sync::lock(&store).active_name() };
     let mut state = MainState {
         store,
         overlay: overlay.clone(),
@@ -613,6 +691,15 @@ fn backend_process_main() {
     };
 
     // ---- 托盘 ----
+    if state.hwnd.is_invalid() {
+        // 消息窗口是一切交互（托盘/热键/RawInput/IPC）的宿主：失败必须让用户知道，
+        // 否则表现为「准星在、但托盘热键全都没反应」
+        warn!("消息窗口创建失败：托盘/热键/IPC 不可用");
+        show_message_box(
+            "ACAJA 启动异常",
+            "消息窗口创建失败：托盘、热键与设置同步将不可用。\n\n请重启程序；若反复出现请反馈崩溃日志。",
+        );
+    }
     let icon_path = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("app.ico")))
@@ -652,8 +739,16 @@ fn backend_process_main() {
     // - 兜底 50ms 超时（消费 fg/其它通道）
     info!("主消息循环启动: hwnd={:?}", state.hwnd);
     let mut tick_counter: u32 = 0;
+    let mut caught_panics: u32 = 0;
     loop {
-        if pump_message_batch(&mut state, &quit_flag()) {
+        let (exit_now, panicked) = run_message_iteration(&mut state);
+        if panicked {
+            caught_panics = caught_panics.saturating_add(1);
+            report_caught_panic(caught_panics);
+        } else {
+            caught_panics = 0;
+        }
+        if exit_now {
             break;
         }
         // 消费通道（前台事件）
@@ -696,7 +791,9 @@ fn backend_process_main() {
         t.remove();
     }
     overlay.close();
-    let _ = overlay_thread.join();
+    if let Some(t) = overlay_thread {
+        let _ = t.join();
+    }
     info!("ACAJA 后台壳已退出");
 }
 

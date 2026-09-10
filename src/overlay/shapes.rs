@@ -80,11 +80,6 @@ impl ShapeParams {
     fn eff_gap(self) -> f32 {
         self.gap + self.expand
     }
-    /// 外接半径（考虑粗细与描边）
-    fn radius(self) -> f32 {
-        let r = self.size.max(self.gap + self.size) + self.thickness / 2.0 + self.outline + 1.0;
-        r + self.expand
-    }
 }
 
 /// 生成形状几何；`CustomImage` 返回 `None`（由渲染层处理位图）

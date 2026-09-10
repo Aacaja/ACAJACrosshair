@@ -36,8 +36,29 @@ fn init_logging() -> Option<PathBuf> {
     Some(log_path)
 }
 
+/// 崩溃日志（与主程序共用 `acaja-crash.log`）：设置进程在发行版里同样是「静默死亡」，
+/// 而它崩溃时用户只看到「窗口不见了」，没有日志就无从诊断。
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC(UI): {info}");
+        log::error!("{msg}");
+        if let Ok(dir) = acaja::appdata_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("acaja-crash.log"))
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "[{:?}] {msg}", std::time::SystemTime::now());
+            }
+        }
+    }));
+}
+
 fn main() {
     init_logging();
+    install_panic_hook();
     info!("ACAJA 设置进程启动");
 
     // 设置进程单例
@@ -49,7 +70,8 @@ fn main() {
         warn!("设置进程已在运行");
         return;
     }
-    std::mem::forget(mutex);
+    // 句柄是 Copy 类型、无 Drop：保留即可，进程退出时由系统回收（mem::forget 是空操作）
+    let _mutex_guard = mutex;
 
     // 主进程自检：主进程消失（退出/崩溃）→ 设置进程兜底退出
     std::thread::spawn(|| loop {

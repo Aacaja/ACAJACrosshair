@@ -37,3 +37,6 @@ dist/
 
 # Logs
 *.log*.lnk
+
+# Cargo.lock 故意不跟踪（保持依赖解析与 CI 一致）
+Cargo.lock

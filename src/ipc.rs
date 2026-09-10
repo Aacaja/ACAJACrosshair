@@ -17,6 +17,7 @@ pub const IPC_TAG_PRESET: usize = 0xACAA_0001;
 
 /// WM_COPYDATA 数据结构（windows-rs 未绑定，手工定义，布局与 winuser.h 一致）
 #[repr(C)]
+#[allow(non_snake_case)] // 字段名对齐 Win32 ABI（COPYDATASTRUCT）
 pub struct CopyDataStruct {
     pub dwData: usize,
     pub cbData: u32,

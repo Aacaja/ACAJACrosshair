@@ -6,6 +6,12 @@ fn main() {
     if target_os != "windows" {
         return;
     }
+    // 交叉类型检查（无 Windows 资源编译器的主机上跑 `cargo check --target *-pc-windows-msvc`）：
+    // 设 ACAJA_SKIP_WINRES=1 跳过图标/版本资源嵌入，只为拿到编译期的类型校验。
+    if std::env::var_os("ACAJA_SKIP_WINRES").is_some() {
+        println!("cargo:warning=ACAJA_SKIP_WINRES: 跳过 winres 资源嵌入（仅类型检查）");
+        return;
+    }
 
     // ---- 旧版图标沿用（品牌替换时直接换 assets 下文件即可）----
     let mut res = winres::WindowsResource::new();

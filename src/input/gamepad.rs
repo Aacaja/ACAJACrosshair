@@ -19,6 +19,7 @@ const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+#[allow(non_snake_case)] // 字段名对齐 XInput ABI（XINPUT_GAMEPAD）
 pub struct XINPUT_GAMEPAD {
     pub wButtons: u16,
     pub bLeftTrigger: u8,
@@ -32,6 +33,7 @@ pub struct XINPUT_GAMEPAD {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+#[allow(non_snake_case)] // 字段名对齐 XInput ABI（XINPUT_STATE）
 pub struct XINPUT_STATE {
     pub dwPacketNumber: u32,
     pub Gamepad: XINPUT_GAMEPAD,
@@ -131,7 +133,7 @@ pub fn start_gamepad(
 
             while !stop2.load(Ordering::SeqCst) {
                 // 动态读取配置（轻量读锁）
-                let cfg_now = *cfg.read().unwrap();
+                let cfg_now = *crate::sync::read(&cfg);
                 let threshold = cfg_now.threshold.max(1);
                 let ads_source = cfg_now.ads_source;
 
@@ -175,8 +177,11 @@ pub fn start_gamepad(
                 }
             }
         })
-        .expect("spawn gamepad thread");
+        .map_err(|e| warn!("手柄轮询线程创建失败: {e}"))
+        .ok();
 
+    // 线程没起来也照常返回句柄：主循环 try_recv 永远收不到事件（等价于「未接手柄」），
+    // 不该让一次线程创建失败 panic 掉整个后台进程。
     GamepadWatcher { events: rx, stop }
 }
 
