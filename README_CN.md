@@ -1,7 +1,7 @@
 # ACAJA —— Windows 准星覆盖工具
 
 >[!NOTE]
-> **当前版本 v1.2.0**：完整功能齐备（设置界面 / 托盘 / 热键 / 手柄 ADS / 按游戏自动切预设），见文末 [Roadmap](#roadmap)。
+> **当前版本 v1.2.0**：完整功能齐备（设置界面 / 托盘 / 热键 / 手柄 ADS / 按游戏自动切预设），见文末 [迭代路线](#迭代路线功能优先--主程序保持绝对轻量)。
 
 ACAJA 是一个 Windows 桌面准星覆盖工具，用 **Rust** 编写（`windows-rs` + Direct2D + egui），是原 [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN)（小林の准星，Python/PySide6）的全新重写版。
 
