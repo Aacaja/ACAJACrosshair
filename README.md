@@ -110,7 +110,7 @@ src/
 
 | Iteration | Version | Theme | Status |
 |---|---|---|---|
-| 1 | **v1.2.0** | Profile & editing workflow + Liquid Glass UI | ✅ done |
+| 1 | **v1.2.0** | Profile & editing workflow + Liquid Glass UI | ✅ done ([release](https://github.com/Aacaja/ACAJACrosshair/releases/tag/v1.2.0)) |
 | 2 | v1.2.1 | Dynamic crosshair & firing feedback (recoil curve / burst stacking / fire source) | ⏳ next |
 | 3 | v1.2.2 | Multi-monitor & game integration (snap rules / per-monitor profiles / process picker) | ⏳ queued |
 | 4 | v1.3.0 | Usability polish (config backup & rollback / portable mode / tray preset submenu / perf panel) | ⏳ queued |
