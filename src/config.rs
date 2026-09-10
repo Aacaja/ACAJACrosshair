@@ -1065,6 +1065,9 @@ mod tests {
     #[test]
     fn corrupt_file_falls_back_to_defaults() {
         let dir = temp_dir("corrupt");
+        // 注意：这个 open 的**副作用**是必需的——它创建 presets/ 子目录，
+        // 下面才能把损坏文件写进去（不是可以删掉的“未使用变量”）。
+        PresetStore::open(&dir).unwrap();
         fs::write(dir.join("presets").join("broken.json"), "{ not json !!!").unwrap();
         let store = PresetStore::open(&dir).unwrap();
         // 损坏文件被忽略，default 仍存在
