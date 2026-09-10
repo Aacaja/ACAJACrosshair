@@ -84,7 +84,7 @@ pub fn start_fg_watcher(tx: Sender<FgEvent>) -> Option<HWINEVENTHOOK> {
             }
             EVENT_SYSTEM_MOVESIZEEND => {
                 let now = Instant::now();
-                let mut l = last.lock().unwrap();
+                let mut l = crate::sync::lock(&last);
                 if now.duration_since(*l) < std::time::Duration::from_millis(100) {
                     return;
                 }
@@ -121,39 +121,47 @@ pub fn start_fg_watcher(tx: Sender<FgEvent>) -> Option<HWINEVENTHOOK> {
 
 pub fn stop_fg_watcher(hook: HWINEVENTHOOK) {
     if !hook.is_invalid() {
-        unsafe { UnhookWinEvent(hook) };
+        let _ = unsafe { UnhookWinEvent(hook) };
     }
     HOOK_ACTIVE.store(false, Ordering::SeqCst);
 }
 
-/// 前台窗口的进程 exe 名（大写）。失败返回 None。
-pub fn foreground_exe(hwnd: HWND) -> Option<String> {
+/// 窗口所属进程的完整映像路径（失败返回 None）。
+/// v1.1.7：设置进程据此拿到**主程序真实路径**（开机自启写注册表用），
+/// 因此程序被改名/移动后依然能写对目标。
+pub fn window_process_path(hwnd: HWND) -> Option<String> {
     unsafe {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == 0 {
             return None;
         }
-        let proc = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-        let mut buf = [0u16; 512];
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
         let mut size = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(proc, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut size);
+        let ok = QueryFullProcessImageNameW(
+            proc,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        );
         let _ = CloseHandle(proc);
         if ok.is_err() {
             return None;
         }
-        let name = String::from_utf16_lossy(&buf[..size as usize]);
-        let exe = name.rsplit('\\').next().unwrap_or("").to_string().to_uppercase();
-        if exe.is_empty() { None } else { Some(exe) }
+        Some(String::from_utf16_lossy(&buf[..size as usize]))
     }
+}
+
+/// 前台窗口的进程 exe 名（大写）。失败返回 None。
+pub fn foreground_exe(hwnd: HWND) -> Option<String> {
+    let name = window_process_path(hwnd)?;
+    let exe = name.rsplit('\\').next().unwrap_or("").to_string().to_uppercase();
+    if exe.is_empty() { None } else { Some(exe) }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn exe_name_upper() {

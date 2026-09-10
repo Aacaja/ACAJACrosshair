@@ -16,7 +16,7 @@ use egui::{Align, Color32, ComboBox, Context, Margin, Rangef, RichText, Rounding
 use log::{info, warn};
 
 use crate::config::{
-    AdsButton, AdsMode, Hotkey, PosVal, Preset, PresetStore, RightClickMode, Shape,
+    AdsButton, AdsMode, GameBinding, Hotkey, PosVal, Preset, PresetStore, RightClickMode, Shape,
 };
 use crate::i18n::Lang;
 use crate::ui::strings::{ads_mode_name, shape_name, t};
@@ -28,18 +28,14 @@ const CARD_BG: Color32 = Color32::from_rgb(31, 35, 45);
 const CARD_BG_HOVER: Color32 = Color32::from_rgb(37, 42, 54);
 const BG: Color32 = Color32::from_rgb(20, 22, 28);
 const BORDER: Color32 = Color32::from_rgb(42, 47, 58);
-const HAIRLINE: Color32 = Color32::from_rgb(38, 43, 53);
 const TEXT_DIM: Color32 = Color32::from_rgb(138, 144, 160);
 const LABEL_FG: Color32 = Color32::from_rgb(178, 184, 197);
 const NAV_FG: Color32 = Color32::from_rgb(168, 175, 190);
 const NAV_FG_HOVER: Color32 = Color32::from_rgb(222, 228, 238);
 const NAV_FG_ACTIVE: Color32 = Color32::from_rgb(242, 245, 251);
 const INPUT_BG: Color32 = Color32::from_rgb(24, 27, 35);
-const SWATCH_RING: Color32 = Color32::from_rgb(58, 64, 78);
 const OK: Color32 = Color32::from_rgb(48, 209, 88);
 const WARN: Color32 = Color32::from_rgb(255, 159, 10);
-/// 行标签列宽（滑杆 / 下拉 / 色块行的左列统一对齐）
-const LABEL_W: f32 = 110.0;
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_millis(1800);
 
 /// 导航 section 索引
@@ -50,14 +46,28 @@ const SEC_GAMEPAD: usize = 3;
 const SEC_HOTKEY: usize = 4;
 const SEC_IMAGE: usize = 5;
 const SEC_PRESETS: usize = 6;
+const SEC_SYSTEM: usize = 7;
+
+/// 左侧导航项：(section 索引, 文案 key)。
+///
+/// v1.1.7：导航文案 key 与卡片标题解耦——卡片标题可以很长
+/// （「手柄（Apex 瞄准吸附）」），导航列只有 148px 宽，必须用短标签；
+/// 这里同时也是 `strings` 单测的 key 清单（跑题即报错，不会再出现空白项）。
+pub(crate) const NAV_ITEMS: [(usize, &str); 8] = [
+    (SEC_STYLE, "nav_style"),
+    (SEC_DYNAMIC, "nav_dynamic"),
+    (SEC_POSITION, "nav_position"),
+    (SEC_GAMEPAD, "nav_gamepad"),
+    (SEC_HOTKEY, "nav_hotkey"),
+    (SEC_IMAGE, "nav_image"),
+    (SEC_PRESETS, "nav_presets"),
+    (SEC_SYSTEM, "nav_system"),
+];
 
 pub struct AcajaApp {
     store: Arc<Mutex<PresetStore>>,
-    last_send: std::time::Instant,
     /// 后端连接状态（找到主进程窗口则 true）
     backend_ok: bool,
-    pending_send: bool,
-    last_apply_at: std::time::Instant,
     template_name: &'static str,
     /// 当前导航 section
     active_section: usize,
@@ -82,6 +92,11 @@ pub struct AcajaApp {
     hex_right: String,
     hex_outline: String,
     hotkey_buf: String,
+    /// 「切换下一预设」热键编辑缓冲
+    hotkey_next_buf: String,
+    /// 游戏绑定新增行的编辑缓冲
+    new_binding_exe: String,
+    new_binding_preset: String,
 }
 
 /// 启动设置窗口（独立进程模式：阻塞直到窗口关闭，关闭即进程结束）
@@ -169,10 +184,7 @@ impl AcajaApp {
 
         let mut app = AcajaApp {
             store,
-            last_send: std::time::Instant::now(),
             backend_ok: false,
-            pending_send: false,
-            last_apply_at: std::time::Instant::now(),
             template_name: "tpl_apex",
             active_section: SEC_STYLE,
             preset,
@@ -190,6 +202,9 @@ impl AcajaApp {
             hex_right: String::new(),
             hex_outline: String::new(),
             hotkey_buf: String::new(),
+            hotkey_next_buf: String::new(),
+            new_binding_exe: String::new(),
+            new_binding_preset: String::new(),
         };
         app.sync_hex_buffers();
         app
@@ -206,6 +221,7 @@ impl AcajaApp {
         self.hex_right = f(&self.preset.colors.right);
         self.hex_outline = f(&self.preset.outline.color);
         self.hotkey_buf = self.preset.hotkey_toggle.to_string();
+        self.hotkey_next_buf = self.preset.hotkey_next_profile.to_string();
     }
 
     fn flash(&mut self, text: String) {
@@ -263,7 +279,6 @@ impl AcajaApp {
             false
         };
         self.backend_ok = pushed;
-        self.last_apply_at = Instant::now();
         if saved {
             self.flash(if pushed {
                 t(self.lang, "pushed_ok").to_string()
@@ -354,16 +369,7 @@ impl AcajaApp {
 
     /// 左侧导航（几何状态点 + 文字，选中 = 强调条 + 底色；整行可点）
     fn nav_ui(&mut self, ui: &mut Ui) {
-        let items: [(usize, &str); 7] = [
-            (SEC_STYLE, "shape_style"),
-            (SEC_DYNAMIC, "dynamic"),
-            (SEC_POSITION, "position"),
-            (SEC_GAMEPAD, "nav_gamepad"),
-            (SEC_HOTKEY, "hotkey"),
-            (SEC_IMAGE, "nav_image"),
-            (SEC_PRESETS, "presets"),
-        ];
-        for (idx, key) in items {
+        for (idx, key) in NAV_ITEMS {
             let selected = self.active_section == idx;
             // 整行分配可点击区域：先画背景，再画点与文字（保证遮挡层级正确）
             let (rect, resp) =
@@ -535,7 +541,7 @@ impl AcajaApp {
             // 预览画布
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(ui.available_width(), 210.0), egui::Sense::hover());
-            preview::paint_preview(ui, rect, &self.preset);
+            preview::paint_preview(ui, rect, &self.preset, self.lang);
             ui.add_space(6.0);
             ui.label(RichText::new(t(self.lang, "preview")).size(10.5).color(TEXT_DIM));
         });
@@ -727,6 +733,10 @@ impl AcajaApp {
                     self.dirty = true;
                 }
             });
+            if ui.checkbox(&mut self.preset.snap_to_window, t(self.lang, "snap_to_window")).changed() {
+                self.dirty = true;
+            }
+            ui.label(RichText::new(t(self.lang, "snap_note")).size(10.5).color(TEXT_DIM));
         });
     }
 
@@ -789,6 +799,14 @@ impl AcajaApp {
                 ui.label(t(self.lang, "hotkey_toggle"));
                 if ui.add(TextEdit::singleline(&mut self.hotkey_buf).desired_width(140.0)).changed() {
                     self.preset.hotkey_toggle = Hotkey::parse(&self.hotkey_buf).unwrap_or_default();
+                    self.dirty = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(t(self.lang, "hotkey_next"));
+                if ui.add(TextEdit::singleline(&mut self.hotkey_next_buf).desired_width(140.0)).changed() {
+                    self.preset.hotkey_next_profile =
+                        Hotkey::parse(&self.hotkey_next_buf).unwrap_or_default();
                     self.dirty = true;
                 }
             });
@@ -908,6 +926,136 @@ impl AcajaApp {
             });
             ui.label(RichText::new(t(self.lang, "new_preset")).size(10.5).color(TEXT_DIM));
         });
+
+        // ---- 游戏绑定：前台进程 → 自动套用预设 ----
+        Self::card(ui, Some(t(self.lang, "bindings")), |ui| {
+            let bindings: Vec<(String, String)> = {
+                let store = self.store.lock().unwrap();
+                store
+                    .app
+                    .game_bindings
+                    .iter()
+                    .map(|b| (b.exe.clone(), b.preset.clone()))
+                    .collect()
+            };
+            if bindings.is_empty() {
+                ui.label(RichText::new(t(self.lang, "binding_none")).size(11.0).color(TEXT_DIM));
+            }
+            let mut remove: Option<usize> = None;
+            for (i, (exe, preset)) in bindings.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(exe).size(11.5).color(LABEL_FG));
+                    ui.label(RichText::new("->").size(11.5).color(TEXT_DIM));
+                    ui.label(RichText::new(preset).size(11.5).color(ACCENT_BRIGHT));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(t(self.lang, "binding_remove"))
+                                    .min_size(egui::vec2(58.0, 20.0)),
+                            )
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                    });
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    TextEdit::singleline(&mut self.new_binding_exe)
+                        .hint_text(t(self.lang, "binding_exe"))
+                        .desired_width(170.0),
+                );
+                let names = { self.store.lock().unwrap().preset_names() };
+                ComboBox::from_id_salt("bind_preset")
+                    .width(120.0)
+                    .selected_text(self.new_binding_preset.clone())
+                    .show_ui(ui, |ui| {
+                        for n in &names {
+                            if ui
+                                .selectable_label(&self.new_binding_preset == n, n.clone())
+                                .clicked()
+                            {
+                                self.new_binding_preset = n.clone();
+                            }
+                        }
+                    });
+                if ui
+                    .add(egui::Button::new(t(self.lang, "binding_add")).min_size(egui::vec2(84.0, 24.0)))
+                    .clicked()
+                {
+                    let exe = self.new_binding_exe.trim().to_ascii_lowercase();
+                    if !exe.is_empty() {
+                        let preset = if self.new_binding_preset.is_empty() {
+                            self.active_name.clone()
+                        } else {
+                            self.new_binding_preset.clone()
+                        };
+                        let saved = {
+                            let mut store = self.store.lock().unwrap();
+                            // 同名进程只保留一条（重复添加 = 覆盖绑定）
+                            store.app.game_bindings.retain(|b| !b.exe.eq_ignore_ascii_case(&exe));
+                            store.app.game_bindings.push(GameBinding { exe: exe.clone(), preset });
+                            store.save_app().is_ok()
+                        };
+                        self.new_binding_exe.clear();
+                        self.flash(if saved {
+                            t(self.lang, "binding_added").to_string()
+                        } else {
+                            t(self.lang, "error").to_string()
+                        });
+                    }
+                }
+            });
+            if let Some(i) = remove {
+                let saved = {
+                    let mut store = self.store.lock().unwrap();
+                    if i < store.app.game_bindings.len() {
+                        store.app.game_bindings.remove(i);
+                    }
+                    store.save_app().is_ok()
+                };
+                if saved {
+                    self.flash(t(self.lang, "binding_removed").to_string());
+                }
+            }
+            ui.label(RichText::new(t(self.lang, "binding_note")).size(10.5).color(TEXT_DIM));
+        });
+    }
+
+    /// 系统：应用级开关（开机自启）
+    fn section_system(&mut self, ui: &mut Ui) {
+        Self::card(ui, Some(t(self.lang, "system")), |ui| {
+            let mut autostart = { self.store.lock().unwrap().app.autostart };
+            if ui.checkbox(&mut autostart, t(self.lang, "autostart")).changed() {
+                {
+                    let mut store = self.store.lock().unwrap();
+                    store.app.autostart = autostart;
+                    let _ = store.save_app();
+                }
+                // 注册表必须指向**主程序**（acaja.exe）的真实路径：路径从主进程
+                // 窗口反查得到，所以程序被改名/移动也不会写错目标。
+                // 主程序未运行时无法确定路径 → 只保存开关状态并提示。
+                let target = crate::ipc::find_backend()
+                    .and_then(crate::system::foreground::window_process_path);
+                match target {
+                    Some(path) => {
+                        match crate::system::autostart::set_autostart(autostart, std::path::Path::new(&path)) {
+                            Ok(()) => self.flash(t(self.lang, "saved").to_string()),
+                            Err(e) => {
+                                warn!("开机自启写入注册表失败: {e}");
+                                self.flash(format!("{}: {e}", t(self.lang, "autostart_failed")));
+                            }
+                        }
+                    }
+                    None => {
+                        warn!("未找到主程序窗口，无法确定自启路径");
+                        self.flash(t(self.lang, "autostart_failed").to_string());
+                    }
+                }
+            }
+            ui.label(RichText::new(t(self.lang, "autostart_note")).size(10.5).color(TEXT_DIM));
+        });
     }
 }
 
@@ -970,7 +1118,8 @@ impl eframe::App for AcajaApp {
                             SEC_GAMEPAD => self.section_gamepad(ui),
                             SEC_HOTKEY => self.section_hotkey(ui),
                             SEC_IMAGE => self.section_image(ui),
-                            _ => self.section_presets(ui),
+                            SEC_PRESETS => self.section_presets(ui),
+                            _ => self.section_system(ui),
                         }
                         ui.add_space(6.0);
                     });

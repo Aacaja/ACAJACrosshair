@@ -10,7 +10,7 @@ use crate::overlay::parse_hex;
 use crate::overlay::shapes::{rotation_safe_radius, Prim, ShapeParams, SLOT_BOTTOM, SLOT_LEFT, SLOT_RIGHT, SLOT_TOP};
 
 /// 在给定区域绘制预览
-pub fn paint_preview(ui: &mut Ui, rect: Rect, preset: &Preset) {
+pub fn paint_preview(ui: &mut Ui, rect: Rect, preset: &Preset, lang: crate::i18n::Lang) {
     let painter = ui.painter_at(rect);
 
     // ---- 棋盘格背景 ----
@@ -43,7 +43,6 @@ pub fn paint_preview(ui: &mut Ui, rect: Rect, preset: &Preset) {
     // ---- 几何 ----
     let params = ShapeParams::from_preset(preset, 0.0);
     let Some(geom) = crate::overlay::shapes::build(preset.shape, &params) else {
-        let lang = crate::i18n::Lang::Zh;
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,

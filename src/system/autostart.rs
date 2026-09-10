@@ -14,14 +14,15 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::Foundation::ERROR_SUCCESS;
 
-const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const VALUE_NAME: &str = "ACAJACrosshair";
-/// 写入自启项；enabled=false 时删除
-pub fn set_autostart(enabled: bool) -> windows::core::Result<()> {
+/// 写入自启项；enabled=false 时删除。
+///
+/// `exe` 必须是**主程序**（acaja.exe）路径：v1.1.7 前此处写的是
+/// `current_exe()`，而调用方是设置进程 → 注册表里曾指向 acaja-ui.exe
+/// （开机只会弹出设置窗，准星不启动）。现在由调用方传入主程序真实路径。
+pub fn set_autostart(enabled: bool, exe: &std::path::Path) -> windows::core::Result<()> {
     let key = open_run_key()?;
 
     if enabled {
-        let exe = std::env::current_exe().map_err(|e| windows::core::Error::from(e))?;
         let cmd = format!("\"{}\"", exe.display());
         // UTF-16LE 字节 + 结尾 \0
         let mut bytes: Vec<u8> = Vec::new();
@@ -79,7 +80,6 @@ fn open_run_key() -> windows::core::Result<HKEY> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn autostart_command_format() {

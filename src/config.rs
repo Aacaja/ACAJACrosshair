@@ -559,10 +559,6 @@ pub struct Preset {
     pub right_click_mode: RightClickMode,
     #[serde(default)]
     pub gamepad: GamepadConfig,
-
-    // -- 系统 --
-    #[serde(default)]
-    pub auto_topmost: bool,
 }
 
 fn default_schema() -> u32 {
@@ -617,7 +613,6 @@ impl Default for Preset {
             right_click_toggle: false,
             right_click_mode: RightClickMode::Click,
             gamepad: GamepadConfig::default(),
-            auto_topmost: false,
         }
     }
 }
@@ -657,8 +652,6 @@ pub struct AppConfig {
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default)]
-    pub minimize_to_tray: bool,
-    #[serde(default)]
     pub autostart: bool,
     #[serde(default)]
     pub last_preset: String,
@@ -676,7 +669,6 @@ impl Default for AppConfig {
             schema: SCHEMA_VERSION,
             language: "zh".to_string(),
             theme: default_theme(),
-            minimize_to_tray: false,
             autostart: false,
             last_preset: "default".to_string(),
             game_bindings: Vec::new(),
@@ -977,9 +969,6 @@ fn convert_legacy_value(v: &serde_json::Value) -> Preset {
     p.image.path = get("custom_image_path").unwrap_or("").to_string();
     p.image.scale = get_f("custom_image_scale").unwrap_or(1.0);
 
-    // 系统
-    p.auto_topmost = get_b("auto_topmost_on_fullscreen");
-
     p
 }
 
@@ -1076,7 +1065,6 @@ mod tests {
     #[test]
     fn corrupt_file_falls_back_to_defaults() {
         let dir = temp_dir("corrupt");
-        let store = PresetStore::open(&dir).unwrap();
         fs::write(dir.join("presets").join("broken.json"), "{ not json !!!").unwrap();
         let store = PresetStore::open(&dir).unwrap();
         // 损坏文件被忽略，default 仍存在
@@ -1108,7 +1096,6 @@ mod tests {
             "custom_image_scale": 1.5,
             "hollow_gap": 8,
             "center_dot_size": 5,
-            "auto_topmost_on_fullscreen": true,
             "language": "en",
             "opacity_extra": "ignored_unknown_field"
         }"##;
@@ -1143,7 +1130,6 @@ mod tests {
         assert_eq!(apex.image.scale, 1.5);
         assert_eq!(apex.hollow.gap, 8.0);
         assert_eq!(apex.hollow.center_dot_size, 5.0);
-        assert!(apex.auto_topmost);
 
         // 语言已迁移到 app.json
         assert_eq!(store.app.language, "en");
