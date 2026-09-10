@@ -1,6 +1,74 @@
 # ACAJA 开发日志（Worklog）
 
-> 本文件是项目开发进度的事实记录。新 agent 接入时先读此文件 + `DOCS_DEV_PLAN.md` + `README.md`。
+> 本文件是项目开发进度的事实记录。新 agent 接入时先读 `AGENTS.md`（项目导航）+ 此文件 + `README.md`。
+
+---
+
+## [2026-09-11] v1.1.7：导航空白项根治（i18n 单一表格）+「偶尔报错后直接卡掉」硬化 + 遗留问题清零
+
+总目标：用户反馈两件事——① 准星主程序偶尔报错并直接卡掉；② 设置界面左侧导航有项目显示为「无命名空白」。
+另要求：遍历全项目找可优化点、解决遗留问题、补齐 agent 指导文件。
+
+状态：✅ 完成（CI success：48 单测全过，Windows release 构建通过；commit 6b1e209 / d5c4995 / d334f8f / 5116d31 / b985194）
+
+干到哪了：
+
+**A. 导航空白项（根因已定位到代码行）**
+- 根因：`nav_ui` 取文案用 `t(lang, "nav_gamepad")` / `t(lang, "nav_image")`，但 `ui/strings.rs` 的 `zh()` / `en()`
+  两个**互相独立**的 match 表里都没有这两个 key，兜底 `_ => ""` 直接渲染空串 → 7 项导航里「手柄」「自定义图片」
+  两项显示为无命名空白（用户所见即此）。
+- 结构性修复：`strings.rs` 由「zh/en 两份独立表」改为**单一表格**（一行 = 一个 key，中文/英文同排，
+  按 key 升序 binary_search）→ 漏翻译在结构上不可能发生；key 只出现一次，也不会两边写岔。
+- 导航标签与卡片标题**解耦**：卡片标题很长（「手柄（Apex 瞄准吸附）」），148px 导航列放不下，
+  新增 `nav_*` 短标签，key 清单统一在 `src/ui/mod.rs::NAV_ITEMS`（8 项）。
+- 新增 4 个回归单测：导航 key 中英双语非空、形状/ADS 模式名全覆盖、表有序唯一、每行双语非空；
+  删除 9 个无调用点的死 key（subtitle/close_quits/backend_disconnected/language/theme/show/hide/quit/hex_hint）。
+- 顺带：托盘菜单随界面语言本地化（此前写死中文），预览区「自定义图片」提示不再写死 `Lang::Zh`。
+
+**B.「偶尔报错后直接卡掉」（发行版是 windows_subsystem="windows" 且默认不写日志 = 静默死亡，此前无从诊断）**
+静态排查出 5 个真实致死/致残点，全部修掉：
+1. **崩溃不可诊断** → panic 钩子（主程序 + 设置进程）恒写 `%APPDATA%/ACAJACrosshair/acaja-crash.log`，不受 `--diag` 限制。
+2. **一次 panic = 进程消失** → 主消息循环每次迭代 `catch_unwind` 隔离，捕获后继续运行（准星不掉线），首次弹一次非阻塞提示。
+3. **锁中毒放大** → `.lock().unwrap()` 在持锁 panic 后永久 Err，把「一次小 panic」放大成「之后每次都 panic」的砖头；
+   现改用 `parking_lot`（lock()/read()/write() 直接返回 guard，无 PoisonError 路径）。
+4. **GDI/DIB 泄漏（真·内存增长）** → `DeleteObject` 对「已选入 DC 的位图」会失败，而 `ensure_canvas_size`
+   每次画布尺寸变化都删旧 DIB → 拖动「大小」滑杆每次泄漏一张最大 4MB 的 DIB，长时间使用内存持续上涨；
+   现删除前先 `SelectObject` 换出原 stock 位图（`create_dib` 返回并保存该句柄）。
+5. **托盘菜单卡住** → `TrackPopupMenu` 前未把宿主窗口设为前台窗口（MSDN 明确要求），菜单可能收不到输入、
+   点别处不消失，用户现象即「托盘卡住」；补 `SetForegroundWindow` + 关闭后 `PostMessage(WM_NULL)`；
+   且不再在主消息线程弹模态框（会卡住托盘/热键/实时推送，改为独立线程弹）。
+- 其他：overlay/gamepad 线程创建失败改为降级 + 告警（不再 `expect` 崩进程）；空多边形不再让渲染线程越界 panic；
+  消息窗口创建失败会明确提示（此前表现为「准星在、托盘热键全没反应」且无声）。
+
+**C. 遗留问题清零（后台已实现、界面碰不到的功能全部接通）**
+- 导航新增「系统」分区；新增：**开机自启开关**（注册表 Run 键，路径从主程序窗口反查 → 程序改名/移动也写对目标；
+  此前 `set_autostart` 取 `current_exe()`，从设置进程调用会写成 acaja-ui.exe，等于开机只弹设置窗）、
+  **窗口吸附开关**（`snap_to_window`，后台早已响应前台窗口移动）、**「切换下一预设」热键输入框**（后台早已注册
+  `hotkey_next_profile`）、**游戏绑定编辑器**（前台进程 → 自动切预设，加/删/去重）。
+- 删除死代码：`i18n::Strings` 双份文案表（v1.1.0 双进程重构后已无调用点，托盘文案也因此停留在旧版）、
+  从未被读取的配置字段 `auto_topmost` / `minimize_to_tray`、未使用的常量/导入/字段/函数；
+  构建告警 **40+ → 0**。
+
+**D. agent 指导文件**
+- 新增 `AGENTS.md`：架构地图、验证方式（CI + 本地交叉 `cargo check` 的确切命令）、代码约定、已验证的坑清单、当前边界。
+- 本 WORKLOG 继续作为开发日志；README/README_CN 同步到 v1.1.7 现状（含「两个 exe 必须同目录」等 FAQ）。
+
+踩坑（本轮新增）：
+- **「未使用变量」≠ 可删**：编译器提示 `store` 未使用，删掉后 CI `cargo test` 报
+  `corrupt_file_falls_back_to_defaults` panic——那次 `PresetStore::open` 的**副作用**是创建 `presets/` 子目录。
+  本地 `cargo check` 只做类型检查，抓不到这类行为回归 → **行为门禁只能是 CI 的 cargo test**。
+- 交叉类型检查需要目标 rust-std（装了 `x86_64-pc-windows-msvc` 的 rust-std 到现有 toolchain），
+  且 build.rs 在没有 rc.exe 的主机上必须能跳过 winres → 新增 `ACAJA_SKIP_WINRES=1` 开关。
+
+验证证据：commit b985194（UI/i18n）→ 5116d31（后台硬化）→ d334f8f（单测修复）→ d5c4995（parking_lot）→ 6b1e209（文档）；
+GitHub Actions **success**，`test result: ok. 48 passed; 0 failed`，Windows release 构建通过。
+本地 `cargo check --all-targets --target x86_64-pc-windows-msvc` 零告警（并已用「故意注入类型错误」验证该通道真能报错）。
+
+边界与待用户实测：
+- 用户那台机器上「偶尔卡掉」的**具体触发路径无法在 macOS 复现**（无 Windows 运行环境）：本轮做的是
+  ① 消除所有静态可证的致死路径；② 让之后任何内部错误都留痕（acaja-crash.log）。
+  若再出现，请把 `%APPDATA%/ACAJACrosshair/acaja-crash.log` 发回，即可定位到具体行。
+- 未做：自定义图片文件选择器（仍手填路径）；独占全屏覆盖（系统限制，任何 overlay 都不行）。
 
 ---
 
