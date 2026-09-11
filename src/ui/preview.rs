@@ -2,6 +2,9 @@
 //!
 //! 棋盘格背景模拟过场画面，准星按预设参数居中渲染，
 //! 描边层 + 四象限分色与 overlay 的 draw_prims 逻辑镜像。
+//!
+//! v1.3：棋盘格改成"深空玻璃屏"语言——深黑灰格 + 镜面内边 + 顶部高光，随主题切换；
+//! 三个入口共用一份实现，只是格子大小 / 扩散量不同。
 
 use egui::{pos2, Color32, Mesh, Rect, Shape, Stroke, Ui};
 
@@ -9,30 +12,57 @@ use crate::config::Preset;
 use crate::overlay::parse_hex;
 use crate::overlay::shapes::{rotation_safe_radius, Prim, ShapeParams, SLOT_BOTTOM, SLOT_LEFT, SLOT_RIGHT, SLOT_TOP};
 
-/// 在给定区域绘制预览
-pub fn paint_preview(ui: &mut Ui, rect: Rect, preset: &Preset, lang: crate::i18n::Lang) {
-    paint_preview_cells(ui, rect, preset, lang, 8.0);
+/// 在给定区域绘制预览（`alpha` 是整体淡入系数：卡片入场时预览跟着一起渐显）
+pub fn paint_preview(ui: &mut Ui, rect: Rect, preset: &Preset, lang: crate::i18n::Lang, alpha: f32) {
+    paint_preview_impl(ui, rect, preset, lang, 8.0, 0.0, alpha);
 }
 
 /// 同 `paint_preview`，可指定棋盘格边长。
 ///
 /// 模板缩略图（8 个格子同时绘制）用更大的格子，配合 Mesh 合并，
 /// 让整帧的图元数量保持在很低的水位（拖动滑杆时每帧都会重绘整个预览区）。
-pub fn paint_preview_cells(
+pub fn paint_preview_cells(ui: &mut Ui, rect: Rect, preset: &Preset, lang: crate::i18n::Lang, cell: f32, alpha: f32) {
+    paint_preview_impl(ui, rect, preset, lang, cell, 0.0, alpha);
+}
+
+/// 同 `paint_preview`，但把「开火扩散」量 `expand` 叠加到几何上。
+///
+/// 动态准星分区用它演示"开火瞬间"的形态（与 overlay 的 `ShapeParams.expand` 是同一条路径）。
+pub fn paint_preview_expanded(ui: &mut Ui, rect: Rect, preset: &Preset, lang: crate::i18n::Lang, expand: f32, alpha: f32) {
+    paint_preview_impl(ui, rect, preset, lang, 8.0, expand, alpha);
+}
+
+/// 预览实现：`cell` 棋盘格边长，`expand` 叠加的开火扩散量（0 = 静止形态），`alpha` 整体淡入系数
+fn paint_preview_impl(
     ui: &mut Ui,
     rect: Rect,
     preset: &Preset,
     lang: crate::i18n::Lang,
     cell: f32,
+    expand: f32,
+    alpha: f32,
 ) {
+    let k = alpha.clamp(0.0, 1.0);
+    if k <= 0.004 {
+        return;
+    }
     let painter = ui.painter_at(rect);
+    let dark = ui.visuals().dark_mode;
+    // 整块预览跟着卡片一起淡入（否则入场时会"啪"地整块跳出来）
+    let fa = |c: Color32| -> Color32 {
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * k).round().clamp(0.0, 255.0) as u8)
+    };
 
     // ---- 棋盘格背景（单个 Mesh：每格 2 个三角形，一次提交） ----
     let cell = cell.max(4.0);
-    let light = Color32::from_gray(46);
-    let dark = Color32::from_gray(38);
+    // 深色：深邃黑灰（#18181A / #111112），不要纯黑；浅色：雾灰
+    let (c_light, c_dark, c_edge) = if dark {
+        (fa(Color32::from_gray(24)), fa(Color32::from_gray(17)), fa(Color32::from_gray(38)))
+    } else {
+        (fa(Color32::from_gray(228)), fa(Color32::from_gray(214)), fa(Color32::from_gray(182)))
+    };
     // 3px 边框：既像「屏幕边框」，也把方角棋盘与圆角外框的差值藏起来
-    painter.rect_filled(rect, 8.0, Color32::from_gray(28));
+    painter.rect_filled(rect, 10.0, c_edge);
     let grid = rect.shrink(3.0);
     let mut mesh = Mesh::default();
     let cols = (grid.width() / cell).ceil().max(1.0) as i32;
@@ -46,7 +76,7 @@ pub fn paint_preview_cells(
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
-            let c = if (row + col) % 2 == 0 { light } else { dark };
+            let c = if (row + col) % 2 == 0 { c_light } else { c_dark };
             let base = mesh.vertices.len() as u32;
             mesh.colored_vertex(pos2(x0, y0), c);
             mesh.colored_vertex(pos2(x1, y0), c);
@@ -57,17 +87,29 @@ pub fn paint_preview_cells(
         }
     }
     painter.add(Shape::mesh(mesh));
-    painter.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, Color32::from_gray(62)));
+    // 玻璃屏：外框 + 顶部一道镜面高光（与卡片的玻璃语言一致）
+    painter.rect_stroke(
+        rect,
+        10.0,
+        Stroke::new(1.0_f32, fa(if dark { Color32::from_white_alpha(24) } else { Color32::from_black_alpha(30) })),
+    );
+    painter.line_segment(
+        [
+            pos2(rect.left() + 14.0, rect.top() + 3.5),
+            pos2(rect.right() - 14.0, rect.top() + 3.5),
+        ],
+        Stroke::new(1.0_f32, fa(if dark { Color32::from_white_alpha(34) } else { Color32::from_white_alpha(150) })),
+    );
 
     // ---- 几何 ----
-    let params = ShapeParams::from_preset(preset, 0.0);
+    let params = ShapeParams::from_preset(preset, expand);
     let Some(geom) = crate::overlay::shapes::build(preset.shape, &params) else {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             crate::ui::strings::t(lang, "custom_image"),
             egui::FontId::proportional(13.0),
-            Color32::from_gray(160),
+            fa(if dark { Color32::from_gray(170) } else { Color32::from_gray(110) }),
         );
         return;
     };
@@ -94,7 +136,7 @@ pub fn paint_preview_cells(
     let outline = &preset.outline;
 
     let color32 = |(r, g, b): (f32, f32, f32), a: f32| -> Color32 {
-        let a255 = (a.clamp(0.0, 1.0) * 255.0) as u8;
+        let a255 = (a.clamp(0.0, 1.0) * 255.0 * k) as u8;
         Color32::from_rgba_unmultiplied(
             (r * 255.0) as u8,
             (g * 255.0) as u8,
@@ -161,7 +203,6 @@ fn paint_prim(
                 tf(*cx, *cy),
                 egui::vec2((w + delta * 2.0) * scale, (h + delta * 2.0) * scale),
             );
-            let _ = rect;
             painter.add(Shape::rect_filled(rect, 0.0, *color));
         }
         Prim::RectStroke { cx, cy, w, h, .. } => {

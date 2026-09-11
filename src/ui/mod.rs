@@ -1,9 +1,16 @@
-//! ACAJA 设置窗口（v1.2 「液态玻璃 / Liquid Glass」重设计）。
+//! ACAJA 设置窗口（v1.3 「深空玻璃」重设计）。
 //!
-//! 结构：无边框透明窗口 → 自绘背板 + 自绘标题栏 → 左导航 + 右内容（玻璃卡片）→ 底部操作条。
-//! 视觉：**全部自绘**（深空渐变 + 柔和光斑 + 玻璃叠加 + 镜面边 + 分层阴影 + 弹簧动效），
+//! 结构：无边框透明窗口 → 自绘背板 + 自绘标题栏 → 左导航玻璃轨 + 右内容（不对称网格卡片）→ 底部操作条。
+//! 视觉：**全部自绘**（深黑灰底 + 低饱和霓虹紫/克莱因蓝色相光斑 + 强毛玻璃叠加 + 镜面边 + 分层阴影），
 //!       不依赖系统透明能力——系统透明不可用时界面依然是完整正确的；Win11 上再由
 //!       `windowfx::apply_once` 叠加系统圆角 / 亚克力背板（失败静默降级）。
+//! 排版：**三族分工**——`FontFamily::Name("serif")` 衬线（标题 / 大字 / 序号）、
+//!       `FontFamily::Name("bold")` 无衬线粗体（数值 / 关键值）、`Proportional` 正文；
+//!       字体只在 `AcajaApp::new` 里经 `fonts::install` 安装一次（每帧 set_fonts 会闪烁）。
+//! 布局：PAD 28 / 侧栏 200 / 内容与侧栏间距 24；内容区走 `row2` 的**不对称两列网格**
+//!       （按比例分栏、允许两列不等宽不等高，也允许单卡内部再左右不对称）。
+//! 动效：hover 0.18s / 数值 0.24s / 入场 0.30s（错峰 50ms），全部 ease-out，
+//!       只在动画进行中 `request_repaint()`，静止时零重绘。
 //! 行为：工作副本模式；编辑控件立即写工作副本并置脏标记；
 //!       「应用」= 保存文件 + 尽力实时推送（IPC 负载格式不变）；
 //!       「退出主程序」= 写命令文件；关闭窗口由 `on_exit` 自动保存。
@@ -18,9 +25,9 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use egui::{
-    Align, Align2, Color32, ComboBox, Context, CursorIcon, FontId, Frame, Id, Layout, Margin, Pos2,
-    Rangef, Rect, ResizeDirection, Response, RichText, Rounding, ScrollArea, Sense, Shape, Stroke,
-    TextEdit, Ui, UiBuilder, Vec2, ViewportCommand,
+    Align, Align2, Color32, ComboBox, Context, CursorIcon, FontFamily, FontId, Frame, Id, Layout,
+    Margin, Pos2, Rangef, Rect, ResizeDirection, Response, RichText, Rounding, ScrollArea, Sense,
+    Shape, Stroke, TextEdit, Ui, UiBuilder, Vec2, ViewportCommand,
 };
 use log::{info, warn};
 
@@ -38,12 +45,66 @@ const STATUS_TTL: Duration = Duration::from_millis(1900);
 const LIVE_PUSH_MIN: Duration = Duration::from_millis(140);
 /// 单次实时推送的超时（毫秒）：主程序忙（例如托盘菜单模态循环）时放弃本次预览，绝不冻结界面
 const LIVE_PUSH_TIMEOUT_MS: u32 = 120;
-/// 内容区左右留白 / 卡片圆角 / 内容圆角
-const PAD: f32 = 14.0;
-const R_WINDOW: f32 = 18.0;
-const R_CARD: f32 = 16.0;
-const R_CTRL: f32 = 9.0;
-const NAV_W: f32 = 168.0;
+
+// ---- 布局令牌（v1.3 「深空玻璃」）-----------------------------------------
+/// 窗口内边距（大留白：28）
+const PAD: f32 = 28.0;
+/// 侧栏玻璃轨宽度（比 v1.2 更宽、更"呼吸"）
+const NAV_W: f32 = 200.0;
+/// 内容区与侧栏的间距
+const NAV_GAP: f32 = 24.0;
+/// 不对称网格的列间距
+const GUTTER: f32 = 20.0;
+/// 卡片之间的行间距
+const GROUP_GAP: f32 = 24.0;
+/// 卡片内边距
+const CARD_PAD: f32 = 22.0;
+/// 内容宽度低于此值 → 2 列网格退化为单列（避免窄窗下控件溢出）
+const STACK_BELOW: f32 = 560.0;
+const R_WINDOW: f32 = 20.0;
+const R_CARD: f32 = 18.0;
+const R_CTRL: f32 = 10.0;
+
+// ---- 动效令牌 -------------------------------------------------------------
+/// hover / 选中过渡
+const ANIM_HOVER: f32 = 0.18;
+/// 数值过渡（勾选、滑杆数值、导航选中）
+const ANIM_VALUE: f32 = 0.24;
+/// 分区切换 / 卡片入场时长
+const ENTER_DUR: f32 = 0.30;
+/// 卡片错峰入场的间隔
+const ENTER_STAGGER: f32 = 0.05;
+/// 入场时卡片上移的距离
+const ENTER_RISE: f32 = 14.0;
+/// hover 抬升距离
+const HOVER_LIFT: f32 = 2.0;
+
+// ---- 字体族助手（族名由 `fonts::install` 保证存在，失败时内部已回退）------
+
+/// 衬线（标题 / 大字 / 序号）
+fn f_serif(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(fonts::FAMILY_SERIF.into()))
+}
+
+/// 无衬线粗体（数值 / 关键值 / 强调）
+fn f_bold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(fonts::FAMILY_BOLD.into()))
+}
+
+/// 无衬线常规（正文）
+fn f_sans(size: f32) -> FontId {
+    FontId::proportional(size)
+}
+
+/// 缓出（ease-out）：入场与 hover 都用它，起步快、收尾稳，不会"生硬"
+fn ease_out(t: f32) -> f32 {
+    egui::emath::easing::cubic_out(t.clamp(0.0, 1.0))
+}
+
+/// 带缓出的布尔过渡；动画进行中才会请求重绘（静止时不空转）
+fn anim_bool(ctx: &Context, id: Id, target: bool, time: f32) -> f32 {
+    ctx.animate_bool_with_time_and_easing(id, target, time, egui::emath::easing::cubic_out)
+}
 
 /// 导航 section 索引
 const SEC_STYLE: usize = 0;
@@ -74,8 +135,11 @@ pub(crate) const NAV_ITEMS: [(usize, &str); 8] = [
 // 调色板（深色：近黑蓝底 + 蓝紫 accent + 暖色点缀；浅色：雾白 + 同色系浅调）
 // ===========================================================================
 
-/// 液态玻璃调色板。字段全部是 `Color32`（`from_rgba_unmultiplied` 不是 const fn，
+/// 深空玻璃调色板。字段全部是 `Color32`（`from_rgba_unmultiplied` 不是 const fn，
 /// 所以用运行时构造函数而不是 const 常量），`Copy` 以便随处传值、不借 `self`。
+///
+/// v1.3 方向：深邃黑灰底（#08080A~#101014，不用纯黑）＋ 低饱和霓虹紫 `#6C5CE7`
+/// ＋ 深紫 `#4B3FA8` ＋ 克莱因蓝 `#002FA7`；状态色整体压一档饱和，避免刺眼。
 #[derive(Clone, Copy)]
 struct Palette {
     dark: bool,
@@ -83,11 +147,15 @@ struct Palette {
     bg_base: Color32,
     bg_top: Color32,
     bg_bottom: Color32,
+    /// 光斑：霓虹紫 / 克莱因蓝 / 深紫 / 紫罗兰
     blob_a: Color32,
     blob_b: Color32,
     blob_c: Color32,
+    blob_d: Color32,
     grain: Color32,
+    /// 玻璃面叠加（很淡，背景色相能从面板里透出来）
     glass: Color32,
+    /// 镜面高光（顶亮底暗的外沿）
     glass_hi: Color32,
     glass_lo: Color32,
     border: Color32,
@@ -95,9 +163,11 @@ struct Palette {
     text: Color32,
     label: Color32,
     dim: Color32,
+    /// 强调色：霓虹紫 → 深紫 → 克莱因蓝
     accent: Color32,
     accent_bright: Color32,
     accent_soft: Color32,
+    accent_deep: Color32,
     accent2: Color32,
     warm: Color32,
     control: Color32,
@@ -118,79 +188,124 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
 }
 
 impl Palette {
-    /// 深色：底 #05060B~#0B0E18，accent #0A84FF，副 accent #5E5CE6，暖色 #FF9F0A
+    /// 深色（默认）：底 #08080A~#101014/#060608；accent #6C5CE7 + 深紫 #4B3FA8 + 克莱因蓝 #002FA7
     fn dark() -> Self {
         Self {
             dark: true,
-            bg_base: rgba(6, 8, 15, 238),
-            bg_top: rgba(26, 33, 58, 180),
-            bg_bottom: rgba(4, 6, 13, 200),
-            blob_a: rgba(10, 132, 255, 110),
-            blob_b: rgba(94, 92, 230, 100),
-            blob_c: rgba(255, 159, 10, 40),
+            bg_base: rgba(8, 8, 10, 244),
+            bg_top: rgba(16, 16, 20, 205),
+            bg_bottom: rgba(6, 6, 8, 216),
+            blob_a: rgba(108, 92, 231, 104),
+            blob_b: rgba(0, 47, 167, 126),
+            blob_c: rgba(75, 63, 168, 96),
+            blob_d: rgba(108, 92, 231, 54),
             grain: Color32::WHITE,
-            glass: rgba(255, 255, 255, 12),
-            glass_hi: rgba(255, 255, 255, 52),
-            glass_lo: rgba(0, 0, 0, 110),
+            glass: rgba(255, 255, 255, 9),
+            glass_hi: rgba(255, 255, 255, 41),
+            glass_lo: rgba(0, 0, 0, 150),
             border: rgba(255, 255, 255, 26),
-            shadow: rgba(0, 0, 0, 130),
-            text: Color32::from_rgb(233, 236, 245),
-            label: Color32::from_rgb(182, 188, 202),
-            dim: Color32::from_rgb(138, 145, 162),
-            accent: Color32::from_rgb(10, 132, 255),
-            accent_bright: Color32::from_rgb(77, 163, 255),
-            accent_soft: rgba(10, 132, 255, 64),
-            accent2: Color32::from_rgb(94, 92, 230),
-            warm: Color32::from_rgb(255, 159, 10),
-            control: rgba(255, 255, 255, 26),
-            hover: rgba(255, 255, 255, 44),
-            input: rgba(0, 0, 0, 120),
-            track: rgba(255, 255, 255, 34),
-            nav_fg: Color32::from_rgb(154, 163, 182),
-            nav_fg_on: Color32::from_rgb(242, 245, 251),
-            ok: Color32::from_rgb(48, 209, 88),
-            warn: Color32::from_rgb(255, 159, 10),
-            danger: Color32::from_rgb(255, 69, 58),
-            popup: rgba(22, 25, 36, 246),
-            well: rgba(0, 0, 0, 90),
+            shadow: rgba(0, 0, 0, 165),
+            text: Color32::from_rgb(244, 245, 248),
+            label: Color32::from_rgb(167, 171, 184),
+            dim: Color32::from_rgb(113, 116, 127),
+            accent: Color32::from_rgb(108, 92, 231),
+            accent_bright: Color32::from_rgb(140, 124, 246),
+            accent_soft: rgba(108, 92, 231, 56),
+            accent_deep: Color32::from_rgb(75, 63, 168),
+            accent2: Color32::from_rgb(0, 47, 167),
+            warm: Color32::from_rgb(224, 166, 75),
+            control: rgba(255, 255, 255, 22),
+            hover: rgba(255, 255, 255, 38),
+            input: rgba(0, 0, 0, 130),
+            track: rgba(255, 255, 255, 30),
+            nav_fg: Color32::from_rgb(142, 147, 163),
+            nav_fg_on: Color32::from_rgb(244, 245, 248),
+            ok: Color32::from_rgb(78, 203, 113),
+            warn: Color32::from_rgb(224, 166, 75),
+            danger: Color32::from_rgb(232, 86, 75),
+            popup: rgba(12, 12, 16, 250),
+            well: rgba(0, 0, 0, 108),
         }
     }
 
-    /// 浅色：雾白 #F7F8FC~#E8EAF2，accent #0A6FD8，同名色系浅调
+    /// 浅色：雾白 #F7F8FA~#E4E6EE，同色系浅调（克莱因蓝压深作为强调）
     fn light() -> Self {
         Self {
             dark: false,
-            bg_base: rgba(246, 247, 252, 250),
-            bg_top: rgba(255, 255, 255, 200),
-            bg_bottom: rgba(226, 231, 243, 210),
-            blob_a: rgba(10, 132, 255, 70),
-            blob_b: rgba(94, 92, 230, 60),
-            blob_c: rgba(255, 159, 10, 44),
-            grain: Color32::from_rgb(20, 32, 64),
-            glass: rgba(255, 255, 255, 200),
-            glass_hi: rgba(255, 255, 255, 240),
-            glass_lo: rgba(28, 42, 74, 26),
-            border: rgba(28, 42, 74, 46),
-            shadow: rgba(24, 36, 72, 70),
-            text: Color32::from_rgb(24, 28, 38),
-            label: Color32::from_rgb(58, 66, 84),
-            dim: Color32::from_rgb(112, 120, 140),
-            accent: Color32::from_rgb(10, 111, 216),
-            accent_bright: Color32::from_rgb(10, 132, 255),
-            accent_soft: rgba(10, 132, 255, 44),
-            accent2: Color32::from_rgb(94, 92, 230),
-            warm: Color32::from_rgb(230, 130, 0),
-            control: rgba(28, 42, 74, 26),
-            hover: rgba(28, 42, 74, 44),
-            input: rgba(255, 255, 255, 200),
-            track: rgba(28, 42, 74, 40),
-            nav_fg: Color32::from_rgb(92, 100, 120),
-            nav_fg_on: Color32::from_rgb(16, 20, 30),
-            ok: Color32::from_rgb(29, 163, 74),
-            warn: Color32::from_rgb(199, 119, 0),
-            danger: Color32::from_rgb(215, 55, 46),
+            bg_base: rgba(246, 247, 250, 250),
+            bg_top: rgba(255, 255, 255, 205),
+            bg_bottom: rgba(228, 230, 238, 216),
+            blob_a: rgba(108, 92, 231, 54),
+            blob_b: rgba(0, 47, 167, 40),
+            blob_c: rgba(75, 63, 168, 38),
+            blob_d: rgba(108, 92, 231, 30),
+            grain: Color32::from_rgb(18, 22, 40),
+            glass: rgba(255, 255, 255, 205),
+            glass_hi: rgba(255, 255, 255, 245),
+            glass_lo: rgba(24, 30, 52, 24),
+            border: rgba(24, 30, 52, 42),
+            shadow: rgba(20, 28, 56, 64),
+            text: Color32::from_rgb(23, 26, 34),
+            label: Color32::from_rgb(76, 83, 100),
+            dim: Color32::from_rgb(122, 128, 144),
+            accent: Color32::from_rgb(90, 75, 214),
+            accent_bright: Color32::from_rgb(108, 92, 231),
+            accent_soft: rgba(90, 75, 214, 40),
+            accent_deep: Color32::from_rgb(75, 63, 168),
+            accent2: Color32::from_rgb(0, 47, 167),
+            warm: Color32::from_rgb(192, 138, 62),
+            control: rgba(24, 30, 52, 22),
+            hover: rgba(24, 30, 52, 36),
+            input: rgba(255, 255, 255, 215),
+            track: rgba(24, 30, 52, 34),
+            nav_fg: Color32::from_rgb(102, 109, 128),
+            nav_fg_on: Color32::from_rgb(16, 19, 26),
+            ok: Color32::from_rgb(47, 168, 92),
+            warn: Color32::from_rgb(192, 138, 62),
+            danger: Color32::from_rgb(212, 75, 64),
             popup: rgba(252, 253, 255, 250),
-            well: rgba(28, 42, 74, 20),
+            well: rgba(24, 30, 52, 18),
+        }
+    }
+
+    /// 整块调色板淡入（卡片入场用）：所有 alpha 乘以 `k`
+    fn a_mul(self, k: f32) -> Self {
+        let f = |c: Color32| with_alpha(c, (c.a() as f32 * k).round().clamp(0.0, 255.0) as u8);
+        Self {
+            bg_base: f(self.bg_base),
+            bg_top: f(self.bg_top),
+            bg_bottom: f(self.bg_bottom),
+            blob_a: f(self.blob_a),
+            blob_b: f(self.blob_b),
+            blob_c: f(self.blob_c),
+            blob_d: f(self.blob_d),
+            grain: f(self.grain),
+            glass: f(self.glass),
+            glass_hi: f(self.glass_hi),
+            glass_lo: f(self.glass_lo),
+            border: f(self.border),
+            shadow: f(self.shadow),
+            text: f(self.text),
+            label: f(self.label),
+            dim: f(self.dim),
+            accent: f(self.accent),
+            accent_bright: f(self.accent_bright),
+            accent_soft: f(self.accent_soft),
+            accent_deep: f(self.accent_deep),
+            accent2: f(self.accent2),
+            warm: f(self.warm),
+            control: f(self.control),
+            hover: f(self.hover),
+            input: f(self.input),
+            track: f(self.track),
+            nav_fg: f(self.nav_fg),
+            nav_fg_on: f(self.nav_fg_on),
+            ok: f(self.ok),
+            warn: f(self.warn),
+            danger: f(self.danger),
+            popup: f(self.popup),
+            well: f(self.well),
+            ..self
         }
     }
 }
@@ -217,22 +332,34 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 // 玻璃绘制原语（全部产出 Shape，便于放到「内容之下」或一次性提交）
 // ===========================================================================
 
-/// 柔和外阴影：多层偏移圆角描边（egui 没有高斯模糊，用同心层模拟）
+/// 柔和外阴影：多层同心圆角描边（egui 没有高斯模糊，用同心层模拟）。
+///
+/// v1.3：深色主题下铺到 34px、12 层，再加一层 3px 的贴身暗部——
+/// 卡片被"托"在深空底之上，而不是贴上去。
 fn push_shadow(out: &mut Vec<Shape>, rect: Rect, radius: f32, pal: &Palette, k: f32) {
-    let steps = 6;
+    let spread = if pal.dark { 34.0 } else { 20.0 };
+    let steps = if pal.dark { 12 } else { 8 };
+    let step = spread / steps as f32;
+    let y = if pal.dark { 10.0 } else { 5.0 };
     for i in 0..steps {
         let t = i as f32 / steps as f32;
-        let grow = 1.0 + i as f32 * 1.7;
-        let a = (1.0 - t) * (1.0 - t) * k * if pal.dark { 0.85 } else { 0.60 };
-        if a <= 0.01 {
+        let grow = 1.0 + i as f32 * step;
+        let a = (1.0 - t).powi(2) * 0.075 * k;
+        if a <= 0.004 {
             continue;
         }
         out.push(Shape::rect_stroke(
-            rect.expand(grow).translate(Vec2::new(0.0, 2.0)),
+            rect.expand(grow).translate(Vec2::new(0.0, y * (0.35 + 0.65 * t))),
             Rounding::same(radius + grow),
-            Stroke::new(1.7_f32, fade(pal.shadow, a)),
+            Stroke::new(step + 0.6, fade(pal.shadow, a)),
         ));
     }
+    // 贴身暗部：给玻璃底座一个明确的落点
+    out.push(Shape::rect_stroke(
+        rect.expand(0.5).translate(Vec2::new(0.0, 3.0)),
+        Rounding::same(radius + 0.5),
+        Stroke::new(2.0_f32, fade(pal.shadow, 0.22 * k)),
+    ));
 }
 
 /// 圆角垂直渐变：分带填充，首带取上半圆角、末带取下半圆角，中间带不外扩 → 不会溢出圆角
@@ -262,56 +389,90 @@ fn push_vgrad(out: &mut Vec<Shape>, rect: Rect, radius: f32, top: Color32, botto
     }
 }
 
-/// 玻璃面板：阴影 → 玻璃底（上下微渐变）→ 顶部光泽带 → 镜面边（顶亮底暗）
+/// 玻璃面板：外阴影 → 白色玻璃底 → **紫/克莱因蓝色相流动** → 顶部光泽 → 镜面边（顶亮底暗）
+///
+/// 关键取舍：玻璃底保持很低的 alpha（≈0.05），背景的光斑色相能从面板里透出来；
+/// 层次靠"叠加"而不是"加厚"——多叠几层极淡的色，而不是把面板画得更不透明。
 fn push_panel(out: &mut Vec<Shape>, rect: Rect, radius: f32, pal: &Palette, hot: f32) {
-    push_shadow(out, rect, radius, pal, 0.95);
-    let base = pal.glass;
-    push_vgrad(out, rect, radius, mix(base, pal.glass_hi, 0.10 + 0.20 * hot), base, 6);
+    push_shadow(out, rect, radius, pal, 0.9 + 0.5 * hot);
+    if pal.dark {
+        // 白色玻璃底：上微亮、下沉
+        push_vgrad(out, rect, radius, rgba(255, 255, 255, 15), pal.glass, 6);
+        // 色相流动：顶缘霓虹紫 → 下半克莱因蓝（极淡，只负责"有色"）
+        push_vgrad(
+            out,
+            rect,
+            radius,
+            fade(pal.accent, 0.075 + 0.035 * hot),
+            fade(pal.accent2, 0.065),
+            8,
+        );
+        if hot > 0.01 {
+            // hover：面板内部泛起的紫色呼吸 + 内侧一圈柔光
+            out.push(Shape::rect_filled(rect, Rounding::same(radius), fade(pal.accent_soft, 0.22 * hot)));
+            out.push(Shape::rect_stroke(
+                rect.shrink(1.0),
+                Rounding::same(radius - 1.0),
+                Stroke::new(1.5_f32, fade(pal.accent, 0.10 * hot)),
+            ));
+        }
+    } else {
+        push_vgrad(out, rect, radius, rgba(255, 255, 255, 235), pal.glass, 6);
+        push_vgrad(out, rect, radius, fade(pal.accent, 0.035), fade(pal.accent2, 0.030), 8);
+    }
     // 顶部光泽带（固定高度，底边是直线、内部不溢出）
-    let gloss = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + 44.0));
+    let gloss = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + 56.0));
     out.push(Shape::rect_filled(
         gloss,
         Rounding { nw: radius, ne: radius, sw: 0.0, se: 0.0 },
-        fade(pal.glass_hi, if pal.dark { 0.06 + 0.06 * hot } else { 0.16 + 0.10 * hot }),
+        fade(pal.glass_hi, if pal.dark { 0.34 + 0.18 * hot } else { 0.55 + 0.20 * hot }),
     ));
-    out.push(Shape::rect_stroke(rect, Rounding::same(radius), Stroke::new(1.0_f32, pal.border)));
-    let inner = Rangef::new(rect.left() + radius * 0.7, rect.right() - radius * 0.7);
-    out.push(Shape::hline(inner, rect.top() + 1.0, Stroke::new(1.0_f32, fade(pal.glass_hi, 0.62))));
-    out.push(Shape::hline(inner, rect.bottom() - 1.0, Stroke::new(1.0_f32, fade(pal.glass_lo, 0.85))));
+    // 镜面边：1px 外沿（顶亮底暗）
+    out.push(Shape::rect_stroke(
+        rect,
+        Rounding::same(radius),
+        Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, 0.40 * hot)),
+    ));
+    let inner = Rangef::new(rect.left() + radius * 0.75, rect.right() - radius * 0.75);
+    out.push(Shape::hline(inner, rect.top() + 1.0, Stroke::new(1.0_f32, fade(pal.glass_hi, 0.80 + 0.20 * hot))));
+    out.push(Shape::hline(inner, rect.bottom() - 0.5, Stroke::new(1.0_f32, fade(pal.glass_lo, 0.95))));
 }
 
-/// 内凹玻璃（输入框 / 下滑槽 / 缩略图井）
+/// 内凹玻璃（输入框 / 下滑槽 / 缩略图井）：顶内阴影 + 底玻璃厚度
 fn push_well(out: &mut Vec<Shape>, rect: Rect, radius: f32, pal: &Palette) {
     out.push(Shape::rect_filled(rect, Rounding::same(radius), pal.input));
-    // 下半段再压一层暗色 → 内凹的纵深（浅色主题下是玻璃的厚度）
-    let lower = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + rect.height() * 0.55), rect.max);
+    // 下半段再压一层暗色 → 内凹的纵深
+    let lower = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + rect.height() * 0.5), rect.max);
     out.push(Shape::rect_filled(
         lower,
         Rounding { nw: 0.0, ne: 0.0, sw: radius, se: radius },
         pal.well,
     ));
-    out.push(Shape::hline(
-        Rangef::new(rect.left() + radius * 0.6, rect.right() - radius * 0.6),
-        rect.top() + 1.0,
-        Stroke::new(1.0_f32, fade(pal.glass_lo, 0.9)),
-    ));
-    out.push(Shape::rect_stroke(rect, Rounding::same(radius), Stroke::new(1.0_f32, fade(pal.border, 0.8))));
+    let inner = Rangef::new(rect.left() + radius * 0.6, rect.right() - radius * 0.6);
+    // 顶：内阴影（转折）
+    out.push(Shape::hline(inner, rect.top() + 1.0, Stroke::new(2.0_f32, fade(pal.glass_lo, 0.55))));
+    // 底：玻璃厚度的一道细高光
+    out.push(Shape::hline(inner, rect.bottom() - 1.0, Stroke::new(1.0_f32, fade(pal.glass_hi, 0.12))));
+    out.push(Shape::rect_stroke(rect, Rounding::same(radius), Stroke::new(1.0_f32, fade(pal.border, 0.9))));
 }
 
-/// 背板：不透明基底 → 深空渐变 → 光斑 → 网格 + 噪点 → 玻璃窗镜面边
+/// 背板：不透明基底 → 深空渐变 → 大面积色相光斑 → 网格 + 噪点 → 玻璃窗镜面边
 fn paint_backdrop(p: &egui::Painter, rect: Rect, pal: &Palette) {
     p.rect_filled(rect, Rounding::same(R_WINDOW), pal.bg_base);
     let mut shapes = Vec::new();
-    push_vgrad(&mut shapes, rect, R_WINDOW, pal.bg_top, pal.bg_bottom, 26);
+    push_vgrad(&mut shapes, rect, R_WINDOW, pal.bg_top, pal.bg_bottom, 30);
     p.add(Shape::Vec(shapes));
-    // 大面积柔和彩色光斑（多层同心低透明度圆）
+    // 大面积柔和色相光斑：霓虹紫 / 克莱因蓝 / 深紫 —— 卡片就浮在它们上面，
+    // 玻璃面板很透，所以这些色相会从每一张卡里透出来（"毛玻璃透感"的来源）
     let (w, h) = (rect.width(), rect.height());
-    soft_blob(p, Pos2::new(rect.left() + w * 0.16, rect.top() + h * 0.05), w * 0.44, pal.blob_a, 12);
-    soft_blob(p, Pos2::new(rect.left() + w * 0.94, rect.top() + h * 0.30), w * 0.40, pal.blob_b, 12);
-    soft_blob(p, Pos2::new(rect.left() + w * 0.60, rect.bottom() + h * 0.08), w * 0.36, pal.blob_c, 10);
+    soft_blob(p, Pos2::new(rect.left() + w * 0.10, rect.top() + h * 0.01), w * 0.54, pal.blob_a, 14);
+    soft_blob(p, Pos2::new(rect.left() + w * 1.00, rect.top() + h * 0.24), w * 0.48, pal.blob_b, 14);
+    soft_blob(p, Pos2::new(rect.left() + w * 0.70, rect.bottom() + h * 0.05), w * 0.46, pal.blob_c, 12);
+    soft_blob(p, Pos2::new(rect.left() + w * 0.26, rect.bottom() - h * 0.03), w * 0.32, pal.blob_d, 10);
+    soft_blob(p, Pos2::new(rect.left() + w * 0.88, rect.top() + h * 0.74), w * 0.24, pal.blob_a, 8);
     // 细网格 + 确定性噪点（同一种子 → 静态颗粒，不闪烁）
-    let grid = fade(pal.grain, if pal.dark { 0.030 } else { 0.045 });
-    let step = 34.0;
+    let grid = fade(pal.grain, if pal.dark { 0.026 } else { 0.040 });
+    let step = 36.0;
     let mut x = rect.left() + step;
     while x < rect.right() - 4.0 {
         p.line_segment([Pos2::new(x, rect.top() + 2.0), Pos2::new(x, rect.bottom() - 2.0)], Stroke::new(1.0_f32, grid));
@@ -322,7 +483,7 @@ fn paint_backdrop(p: &egui::Painter, rect: Rect, pal: &Palette) {
         p.line_segment([Pos2::new(rect.left() + 2.0, y), Pos2::new(rect.right() - 2.0, y)], Stroke::new(1.0_f32, grid));
         y += step;
     }
-    let grain = fade(pal.grain, if pal.dark { 0.035 } else { 0.05 });
+    let grain = fade(pal.grain, if pal.dark { 0.030 } else { 0.045 });
     let mut seed = 0x9E37_79B9u32;
     for _ in 0..200 {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -335,8 +496,12 @@ fn paint_backdrop(p: &egui::Painter, rect: Rect, pal: &Palette) {
             grain,
         );
     }
-    // 玻璃窗镜面轮廓
-    p.rect_stroke(rect.shrink(0.5), Rounding::same(R_WINDOW), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.45)));
+    // 玻璃窗镜面轮廓 + 顶部一道更亮的高光
+    p.rect_stroke(rect.shrink(0.5), Rounding::same(R_WINDOW), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.5)));
+    p.line_segment(
+        [Pos2::new(rect.left() + R_WINDOW, rect.top() + 0.5), Pos2::new(rect.right() - R_WINDOW, rect.top() + 0.5)],
+        Stroke::new(1.0_f32, fade(pal.glass_hi, 0.75)),
+    );
 }
 
 /// 柔光斑：同心圆叠加出「模糊」观感（每层都很淡，越靠内叠加越多）
@@ -366,17 +531,34 @@ enum Btn {
 
 /// 把调色板写进当前 Ui 的样式（ComboBox / TextEdit / DragValue / 滚动条都跟着走）
 fn apply_style(ui: &mut Ui, pal: &Palette) {
+    // 滚动条也走玻璃语言：细、圆、无凹槽（ScrollStyle 挂在 spacing 上，不在 visuals）
+    {
+        let mut sc = egui::style::ScrollStyle::floating();
+        sc.bar_width = 9.0;
+        sc.floating_width = 4.0;
+        sc.handle_min_length = 36.0;
+        sc.bar_inner_margin = 4.0;
+        ui.style_mut().spacing.scroll = sc;
+    }
     let v = ui.visuals_mut();
     v.dark_mode = pal.dark;
     v.override_text_color = Some(pal.text);
     v.panel_fill = Color32::TRANSPARENT;
     v.window_fill = pal.popup;
-    v.window_stroke = Stroke::new(1.0_f32, pal.border);
-    v.window_rounding = Rounding::same(12.0);
+    v.window_stroke = Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, 0.18));
+    v.window_rounding = Rounding::same(14.0);
+    v.menu_rounding = Rounding::same(14.0);
     v.extreme_bg_color = pal.input;
     v.faint_bg_color = pal.control;
     v.selection.bg_fill = pal.accent_soft;
-    v.selection.stroke = Stroke::new(1.0_f32, pal.accent);
+    v.selection.stroke = Stroke::new(1.0_f32, pal.accent_bright);
+    v.window_shadow = egui::epaint::Shadow {
+        offset: Vec2::new(0.0, 14.0),
+        blur: 30.0,
+        spread: 0.0,
+        color: fade(pal.shadow, 0.55),
+    };
+    v.popup_shadow = v.window_shadow;
     v.widgets.noninteractive.bg_fill = pal.control;
     v.widgets.noninteractive.weak_bg_fill = pal.control;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, pal.border);
@@ -389,19 +571,24 @@ fn apply_style(ui: &mut Ui, pal: &Palette) {
     v.widgets.inactive.rounding = Rounding::same(R_CTRL);
     v.widgets.hovered.bg_fill = pal.hover;
     v.widgets.hovered.weak_bg_fill = pal.hover;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, pal.accent_bright);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, 0.7));
     v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, pal.text);
     v.widgets.hovered.rounding = Rounding::same(R_CTRL);
     v.widgets.active.bg_fill = pal.accent_soft;
     v.widgets.active.weak_bg_fill = pal.accent_soft;
     v.widgets.active.bg_stroke = Stroke::new(1.0_f32, pal.accent);
+    v.widgets.active.fg_stroke = Stroke::new(1.0_f32, pal.text);
     v.widgets.active.rounding = Rounding::same(R_CTRL);
     v.widgets.open.bg_fill = pal.control;
     v.widgets.open.weak_bg_fill = pal.control;
+    v.widgets.open.bg_stroke = Stroke::new(1.0_f32, fade(pal.accent, 0.5));
     v.widgets.open.rounding = Rounding::same(R_CTRL);
 }
 
 /// 玻璃按钮。`min_w = 0` → 按文字自动宽度。
+///
+/// 动效：底色 / 描边 / 位移（抬升 2px）共用同一条 `hot` 曲线（0.18s ease-out），
+/// 三项同进同出，不会出现"某一项先跳、另一项慢半拍"的生硬感。
 fn button_sized(
     ui: &mut Ui,
     pal: &Palette,
@@ -412,69 +599,87 @@ fn button_sized(
     h: f32,
     font_size: f32,
 ) -> Response {
-    let font = FontId::proportional(font_size);
+    let font = match kind {
+        Btn::Primary => f_bold(font_size),
+        _ => f_sans(font_size),
+    };
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), pal.text);
-    let w = (galley.size().x + 22.0).max(min_w);
+    let w = (galley.size().x + 26.0).max(min_w);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     let id = Id::new(("btn", seed, label));
-    let hot = ui.ctx().animate_bool_with_time(id, resp.hovered(), 0.12);
+    let hot = anim_bool(ui.ctx(), id, resp.hovered(), ANIM_HOVER);
     let down = resp.is_pointer_button_down_on();
-    let rect = if down { rect.shrink2(Vec2::new(0.0, 0.6)) } else { rect };
+    let lift = HOVER_LIFT * hot - if down { 1.2 } else { 0.0 };
+    let rect = rect.translate(Vec2::new(0.0, -lift));
     let radius = Rounding::same(R_CTRL);
+    let fg = if pal.dark { pal.text } else { Color32::WHITE };
     let mut shapes = Vec::new();
     match kind {
         Btn::Primary => {
-            push_shadow(&mut shapes, rect, R_CTRL, pal, 0.75);
+            push_shadow(&mut shapes, rect, R_CTRL, pal, 0.65 + 0.55 * hot);
             push_vgrad(
                 &mut shapes,
                 rect,
                 R_CTRL,
-                mix(pal.accent_bright, Color32::WHITE, 0.22 + 0.16 * hot),
-                mix(pal.accent, Color32::BLACK, 0.10),
-                4,
+                mix(mix(pal.accent_bright, pal.accent, 0.30), Color32::WHITE, 0.06 + 0.12 * hot),
+                mix(pal.accent_deep, pal.accent2, 0.40),
+                5,
             );
             shapes.push(Shape::hline(
                 Rangef::new(rect.left() + R_CTRL, rect.right() - R_CTRL),
-                rect.top() + 1.3,
-                Stroke::new(1.0_f32, rgba(255, 255, 255, 96)),
+                rect.top() + 1.2,
+                Stroke::new(1.0_f32, rgba(255, 255, 255, 104)),
             ));
-            shapes.push(Shape::rect_stroke(rect, radius, Stroke::new(1.0_f32, fade(pal.accent_bright, 0.85))));
+            shapes.push(Shape::rect_stroke(rect, radius, Stroke::new(1.0_f32, fade(Color32::WHITE, 0.16 + 0.22 * hot))));
             ui.painter().add(Shape::Vec(shapes));
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, Color32::WHITE);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
         }
         Btn::Danger => {
-            push_shadow(&mut shapes, rect, R_CTRL, pal, 0.55);
-            push_vgrad(&mut shapes, rect, R_CTRL, mix(pal.danger, Color32::WHITE, 0.18), mix(pal.danger, Color32::BLACK, 0.10), 4);
-            shapes.push(Shape::rect_stroke(rect, radius, Stroke::new(1.0_f32, fade(pal.danger, 0.9))));
-            ui.painter().add(Shape::Vec(shapes));
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, Color32::WHITE);
-        }
-        Btn::Glass => {
-            push_shadow(&mut shapes, rect, R_CTRL, pal, 0.45);
+            push_shadow(&mut shapes, rect, R_CTRL, pal, 0.5 + 0.5 * hot);
             push_vgrad(
                 &mut shapes,
                 rect,
                 R_CTRL,
-                mix(pal.control, pal.glass_hi, 0.05 + 0.12 * hot),
-                mix(pal.control, pal.glass_lo, 0.25),
-                3,
+                mix(pal.danger, Color32::WHITE, 0.12 + 0.10 * hot),
+                mix(pal.danger, Color32::BLACK, 0.12),
+                4,
+            );
+            shapes.push(Shape::rect_stroke(rect, radius, Stroke::new(1.0_f32, fade(pal.danger, 0.95))));
+            ui.painter().add(Shape::Vec(shapes));
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
+        }
+        Btn::Glass => {
+            push_shadow(&mut shapes, rect, R_CTRL, pal, 0.35 + 0.45 * hot);
+            push_vgrad(
+                &mut shapes,
+                rect,
+                R_CTRL,
+                mix(pal.control, pal.glass_hi, 0.06 + 0.10 * hot),
+                mix(pal.control, pal.glass_lo, 0.22),
+                4,
             );
             shapes.push(Shape::rect_stroke(
                 rect,
                 radius,
-                Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, hot * 0.8)),
+                Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, hot * 0.75)),
             ));
             shapes.push(Shape::hline(
                 Rangef::new(rect.left() + R_CTRL, rect.right() - R_CTRL),
                 rect.top() + 1.0,
-                Stroke::new(1.0_f32, fade(pal.glass_hi, 0.35 + 0.25 * hot)),
+                Stroke::new(1.0_f32, fade(pal.glass_hi, 0.30 + 0.25 * hot)),
             ));
             ui.painter().add(Shape::Vec(shapes));
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, mix(pal.label, pal.text, hot));
         }
         Btn::Ghost => {
-            if hot > 0.01 || down {
-                shapes.push(Shape::rect_filled(rect, radius, fade(pal.control, hot * 0.9 + 0.2)));
+            // 幽灵按钮：hover 才浮出，底色 / 描边 / 文字同一条曲线
+            if hot > 0.01 {
+                shapes.push(Shape::rect_filled(rect, radius, fade(pal.control, 0.2 + 0.8 * hot)));
+                shapes.push(Shape::rect_stroke(
+                    rect,
+                    radius,
+                    Stroke::new(1.0_f32, fade(mix(pal.border, pal.accent_bright, 0.55), hot)),
+                ));
                 ui.painter().add(Shape::Vec(shapes));
             }
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font, mix(pal.dim, pal.text, hot));
@@ -486,36 +691,40 @@ fn button_sized(
     resp
 }
 
-/// 勾选框：accent 填充 + 几何对勾
+/// 勾选框：accent 填充 + 几何对勾（勾选 / hover 两条独立但同步的缓动）
 fn checkbox(ui: &mut Ui, pal: &Palette, seed: &str, on: &mut bool, label: &str) -> bool {
-    let font = FontId::proportional(12.5);
+    let font = f_sans(12.5);
     let text_w = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), pal.label).size().x;
     let w = (26.0 + text_w).min(ui.available_width().max(26.0));
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::click());
-    let t = ui.ctx().animate_value_with_time(Id::new(("chk", seed)), if *on { 1.0 } else { 0.0 }, 0.14);
-    let hot = ui.ctx().animate_bool_with_time(Id::new(("chkh", seed)), resp.hovered(), 0.12);
-    let box_rect = Rect::from_center_size(Pos2::new(rect.left() + 8.5, rect.center().y), Vec2::splat(17.0));
+    let t = ui.ctx().animate_value_with_time(Id::new(("chk", seed)), if *on { 1.0 } else { 0.0 }, ANIM_VALUE);
+    let hot = anim_bool(ui.ctx(), Id::new(("chkh", seed)), resp.hovered(), ANIM_HOVER);
+    let box_rect = Rect::from_center_size(Pos2::new(rect.left() + 9.0, rect.center().y), Vec2::splat(18.0));
     let p = ui.painter();
-    p.rect_filled(box_rect, Rounding::same(5.0), pal.input);
+    p.rect_filled(box_rect, Rounding::same(6.0), pal.input);
+    if hot > 0.01 {
+        p.rect_filled(box_rect.expand(2.5), Rounding::same(8.0), fade(pal.accent, 0.14 * hot));
+    }
     if t > 0.01 {
-        p.rect_filled(box_rect, Rounding::same(5.0), fade(pal.accent, t));
+        // 填充色随 t 连续过渡（input → accent），不是开关式跳变
+        p.rect_filled(box_rect, Rounding::same(6.0), mix(pal.input, pal.accent, t));
         let c = box_rect.center();
         p.add(Shape::line(
-            vec![Pos2::new(c.x - 3.7, c.y + 0.2), Pos2::new(c.x - 1.0, c.y + 3.0), Pos2::new(c.x + 4.0, c.y - 3.1)],
-            Stroke::new(1.9_f32, fade(Color32::WHITE, t)),
+            vec![Pos2::new(c.x - 3.9, c.y + 0.2), Pos2::new(c.x - 1.1, c.y + 3.1), Pos2::new(c.x + 4.2, c.y - 3.2)],
+            Stroke::new(2.0_f32, fade(Color32::WHITE, t)),
         ));
     }
     p.rect_stroke(
         box_rect,
-        Rounding::same(5.0),
-        Stroke::new(1.0_f32, mix(mix(pal.border, pal.accent, t), pal.accent_bright, hot * 0.7)),
+        Rounding::same(6.0),
+        Stroke::new(1.0_f32, mix(mix(pal.border, pal.accent, t), pal.accent_bright, hot * 0.75)),
     );
     p.text(
-        Pos2::new(box_rect.right() + 8.0, rect.center().y),
+        Pos2::new(box_rect.right() + 9.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         font,
-        mix(pal.label, pal.text, if *on { 1.0 } else { hot }),
+        mix(mix(pal.label, pal.text, t), pal.text, hot * 0.8),
     );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -527,7 +736,7 @@ fn checkbox(ui: &mut Ui, pal: &Palette, seed: &str, on: &mut bool, label: &str) 
     false
 }
 
-/// 细轨道 + 高光把手滑杆（f32）
+/// 细轨道 + 高光把手滑杆（f32）；数值用 **bold** 族，与标签形成粗细对比
 fn slider_f32(
     ui: &mut Ui,
     pal: &Palette,
@@ -538,8 +747,8 @@ fn slider_f32(
     decimals: usize,
     suffix: &str,
 ) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width.max(90.0), 22.0), Sense::click_and_drag());
-    let val_w = 46.0_f32.min(rect.width() * 0.4);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width.max(60.0), 22.0), Sense::click_and_drag());
+    let val_w = 46.0_f32.min(rect.width() * 0.45);
     let track = Rect::from_min_max(
         Pos2::new(rect.left(), rect.center().y - 1.5),
         Pos2::new(rect.right() - val_w, rect.center().y + 1.5),
@@ -557,23 +766,27 @@ fn slider_f32(
         }
     }
     let t = ((*v - range.min) / span).clamp(0.0, 1.0);
-    let hot = ui.ctx().animate_bool_with_time(Id::new(("sl", seed)), resp.hovered() || resp.dragged(), 0.12);
+    let hot = anim_bool(ui.ctx(), Id::new(("sl", seed)), resp.hovered() || resp.dragged(), ANIM_HOVER);
     let p = ui.painter();
-    p.rect_filled(track, Rounding::same(2.0), pal.track);
+    p.rect_filled(track.expand2(Vec2::new(0.0, 0.5)), Rounding::same(2.5), pal.track);
     let fill = Rect::from_min_max(track.min, Pos2::new(track.left() + track.width() * t, track.max.y));
     if fill.width() > 0.5 {
-        p.rect_filled(fill, Rounding::same(2.0), mix(pal.accent, pal.accent_bright, 0.35));
+        p.rect_filled(
+            fill.expand2(Vec2::new(0.0, 0.5)),
+            Rounding::same(2.5),
+            mix(pal.accent, pal.accent_bright, 0.35 + 0.35 * hot),
+        );
     }
     let c = Pos2::new(track.left() + track.width() * t, rect.center().y);
-    let r = 6.0 + 1.6 * hot;
-    p.circle_filled(c, r + 4.0, fade(pal.accent, 0.16 + 0.24 * hot));
+    let r = 5.6 + 1.5 * hot;
+    p.circle_filled(c, r + 5.0, fade(pal.accent, 0.12 + 0.26 * hot));
     p.circle_filled(c, r, Color32::WHITE);
-    p.circle_stroke(c, r, Stroke::new(1.0_f32, fade(pal.accent, 0.85)));
+    p.circle_stroke(c, r, Stroke::new(1.0_f32, fade(pal.accent, 0.8 + 0.2 * hot)));
     p.text(
         Pos2::new(rect.right(), rect.center().y),
         Align2::RIGHT_CENTER,
         format!("{:.*}{}", decimals, *v, suffix),
-        FontId::proportional(11.0),
+        f_bold(11.5),
         mix(pal.dim, pal.text, hot),
     );
     if resp.hovered() || resp.dragged() {
@@ -623,18 +836,31 @@ fn text_field(ui: &mut Ui, pal: &Palette, buf: &mut String, width: f32, hint: &s
     .inner
 }
 
-/// 字段标签列宽：中英双语都塞得下最长的一个（"Threshold (0-255)" ≈ 112px）
+/// 字段标签列的默认宽度：中英双语都塞得下最长的一个（"Threshold (0-255)" ≈ 112px）
 const LABEL_W: f32 = 122.0;
 
-/// 固定宽度的字段标签（对齐用）；超出列宽的部分裁掉，绝不压到右侧滑杆上
-fn field_label(ui: &mut Ui, pal: &Palette, text: &str, w: f32) {
+/// 标签列宽：窄栏（不对称网格的窄列）自动收窄，避免控件被挤出卡片
+fn label_w(ui: &Ui) -> f32 {
+    let a = ui.available_width();
+    if a < 250.0 {
+        82.0
+    } else if a < 330.0 {
+        104.0
+    } else {
+        LABEL_W
+    }
+}
+
+/// 固定宽度的字段标签（对齐用）；超出列宽的部分裁掉，绝不压到右侧控件上
+fn field_label(ui: &mut Ui, pal: &Palette, text: &str) {
+    let w = label_w(ui);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::hover());
     let clip = rect.intersect(ui.clip_rect());
     let p = ui.painter().with_clip_rect(clip);
-    p.text(rect.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(12.5), pal.label);
+    p.text(rect.left_center(), Align2::LEFT_CENTER, text, f_sans(12.5), pal.label);
 }
 
-/// 说明文字
+/// 说明文字（弱色 10.5，随栏宽自动折行）
 fn note(ui: &mut Ui, pal: &Palette, text: &str) {
     ui.label(RichText::new(text).size(10.5).color(pal.dim));
 }
@@ -658,36 +884,126 @@ fn file_name(path: &str) -> String {
 
 /// 玻璃卡片：背景用 `Shape::Noop` 占位 → 内容画完后再置换，
 /// 这样阴影 / 玻璃底 / 镜面边都能落在内容**之下**（egui 即时模式的标准做法）。
-fn card(ui: &mut Ui, pal: &Palette, title: Option<&str>, body: impl FnOnce(&mut Ui)) {
+///
+/// 动效（都走 ease-out，绝无生硬跳变）：
+/// - **入场**：`enter` ∈ [0,1] 由调用方按区块计时（首次出现 / 切换分区时只播一次），
+///   0.30s 淡入 + 上移 14px；整卡（玻璃 + 内容）一起位移，靠"先负间距、画完补回"实现，
+///   布局高度因此不变（不会把后面的卡片推来推去）。
+/// - **hover**：整卡抬升 2px + 面板内部泛紫 + 阴影加深，同一条 0.18s 曲线。
+///   抬升量取上一帧的 hover 值——内容与玻璃位移完全同步，滚动时也不会抖。
+fn card(
+    ui: &mut Ui,
+    pal: &Palette,
+    seed: &str,
+    num: &str,
+    enter: f32,
+    title: Option<&str>,
+    body: impl FnOnce(&mut Ui, &Palette),
+) {
+    let e = ease_out(enter);
+    let id = Id::new(("card", seed));
+    let hid = Id::new(("cardh", seed));
+    let prev: Option<Rect> = ui.ctx().data(|d| d.get_temp(id));
+    let hovered = prev.is_some_and(|r| ui.rect_contains_pointer(r));
+    let hot_prev: f32 = ui.ctx().data(|d| d.get_temp(hid)).unwrap_or(0.0);
+    // 整卡位移 = 入场上移 + hover 抬升（入场期间 hover 抬升按 e 淡入，两段位移不叠加打架）
+    let up = ENTER_RISE * (1.0 - e) + HOVER_LIFT * hot_prev * e;
+    if up > 0.05 {
+        ui.add_space(-up);
+    }
+    // 整卡淡入：把调色板整体乘一次 alpha，面板与文字一起渐显
+    let cp = pal.a_mul(0.10 + 0.90 * e);
     let width = ui.available_width();
     let slot = ui.painter().add(Shape::Noop);
     let resp = Frame::none()
-        .inner_margin(Margin::same(16.0))
+        .inner_margin(Margin::same(CARD_PAD))
         .show(ui, |ui| {
-            ui.set_width((width - 32.0).max(120.0));
-            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            ui.set_width((width - CARD_PAD * 2.0).max(120.0));
+            ui.spacing_mut().item_spacing = Vec2::new(10.0, 12.0);
             if let Some(title) = title {
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(Vec2::new(14.0, 16.0), Sense::hover());
-                    let p = ui.painter();
-                    p.circle_filled(Pos2::new(r.left() + 5.0, r.center().y), 2.6, pal.accent);
-                    p.circle_filled(Pos2::new(r.left() + 5.0, r.center().y), 6.0, fade(pal.accent, 0.18));
-                    ui.label(
-                        RichText::new(title)
-                            .size(13.5)
-                            .strong()
-                            .color(mix(pal.text, pal.accent, 0.25)),
-                    );
-                });
-                ui.add_space(2.0);
+                card_title(ui, &cp, num, title);
+                ui.add_space(6.0);
             }
-            body(ui);
+            body(ui, &cp);
+            ui.add_space(4.0);
         });
+    if up > 0.05 {
+        ui.add_space(up);
+    }
     let rect = resp.response.rect;
+    let hot = anim_bool(ui.ctx(), hid, hovered, ANIM_HOVER);
     let mut shapes = Vec::new();
-    push_panel(&mut shapes, rect, R_CARD, pal, 0.0);
+    // 面板也走淡入调色板：玻璃与内容一起渐显（否则玻璃会先跳出来）
+    push_panel(&mut shapes, rect, R_CARD, &cp, hot);
     ui.painter().set(slot, Shape::Vec(shapes));
-    ui.add_space(12.0);
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(id, rect);
+        d.insert_temp(hid, hot);
+    });
+}
+
+/// 卡片标题：衬线序号（"i/n"，n = 本区卡片数；单卡分区传空串）+ 衬线标题 + 固定宽度细线
+fn card_title(ui: &mut Ui, pal: &Palette, num: &str, title: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
+    let p = ui.painter();
+    let mut x = rect.left();
+    if !num.is_empty() {
+        let ng = p.layout_no_wrap(num.to_owned(), f_serif(18.0), fade(pal.accent, 0.9));
+        let nw = ng.size().x;
+        p.galley(Pos2::new(x, rect.center().y - ng.size().y * 0.5), ng, pal.text);
+        x += nw + 11.0;
+    }
+    let tc = mix(pal.text, pal.accent, 0.16);
+    let tg = p.layout_no_wrap(title.to_owned(), f_serif(15.5), tc);
+    let tw = tg.size().x;
+    p.galley(Pos2::new(x, rect.center().y - tg.size().y * 0.5), tg, tc);
+    // 细线分隔：从标题右侧渐隐到卡片右缘
+    let x0 = x + tw + 13.0;
+    let x1 = rect.right();
+    if x0 < x1 - 10.0 {
+        let n = 16;
+        for i in 0..n {
+            let a = i as f32 / n as f32;
+            let b = (i + 1) as f32 / n as f32;
+            let lerp = |t: f32| x0 + (x1 - x0) * t;
+            p.line_segment(
+                [Pos2::new(lerp(a), rect.center().y), Pos2::new(lerp(b), rect.center().y)],
+                Stroke::new(1.0_f32, fade(pal.border, 0.95 * (1.0 - a) * (1.0 - a))),
+            );
+        }
+    }
+}
+
+/// 不对称网格的一行两列（`ratio` = 左列占比，0~1）。
+///
+/// 两列各拿一个"零高"的独立 Ui：内容把各自的 `min_rect` 撑开，行高取两者最大值——
+/// 于是**允许两列不等宽、不等高**（不对称网格的关键），也允许某列内部再左右不对称。
+/// 内容区太窄时自动退化为 50/50，且两列各自不窄于 240px，控件不会被挤出卡片。
+fn row2(ui: &mut Ui, ratio: f32, body: impl FnOnce(&mut Ui, &mut Ui)) {
+    let avail = ui.available_width().max(200.0);
+    let usable = (avail - GUTTER).max(160.0);
+    let ratio = if avail < STACK_BELOW { 0.5 } else { ratio.clamp(0.3, 0.75) };
+    // 两列各留 240px 下限；窄于 480 时退化为对半开（不 clamp，避免 min>max 直接 panic）
+    let (lw, rw) = if usable >= 480.0 {
+        let l = (usable * ratio).clamp(240.0, usable - 240.0);
+        (l, usable - l)
+    } else {
+        let l = usable * 0.5;
+        (l, usable - l)
+    };
+    let top = ui.cursor().min;
+    let layout = Layout::top_down(Align::Min);
+    let mut lui = ui.new_child(
+        UiBuilder::new().max_rect(Rect::from_min_size(top, Vec2::new(lw, 0.0))).layout(layout),
+    );
+    let mut rui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_size(Pos2::new(top.x + lw + GUTTER, top.y), Vec2::new(rw, 0.0)))
+            .layout(layout),
+    );
+    body(&mut lui, &mut rui);
+    let h = lui.min_rect().height().max(rui.min_rect().height());
+    ui.advance_cursor_after_rect(Rect::from_min_size(top, Vec2::new(avail, h)));
 }
 
 // ===========================================================================
@@ -754,13 +1070,19 @@ pub struct AcajaApp {
     thumb: Thumb,
     /// 8 个模板的缩略图预设（启动时构建一次）
     tpl_previews: Vec<Preset>,
+    /// 当前分区的入场起始时刻（`Context::input().time`）：切换分区时重置，
+    /// 卡片入场动画因此**只播一次**，不会被每帧重放
+    enter_t0: f64,
+    /// 本帧时间（每帧取一次，卡片入场进度共用）
+    enter_now: f64,
 }
 
 /// 启动设置窗口（独立进程模式：阻塞直到窗口关闭，关闭即进程结束）
 pub fn run(store: Arc<Mutex<PresetStore>>, title: &'static str) -> eframe::Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
-        .with_inner_size([900.0, 800.0])
-        .with_min_inner_size([820.0, 620.0])
+        .with_inner_size([1040.0, 860.0])
+        // 最小宽度要容纳「侧栏 200 + 间距 24 + 不对称两列网格」，再窄控件就会被挤扁
+        .with_min_inner_size([980.0, 660.0])
         // 无边框 + 透明：自带标题栏与背板，系统装饰全部交给我们自己画
         .with_decorations(false)
         .with_transparent(true)
@@ -788,21 +1110,9 @@ pub fn run(store: Arc<Mutex<PresetStore>>, title: &'static str) -> eframe::Resul
 
 impl AcajaApp {
     fn new(cc: &eframe::CreationContext<'_>, store: Arc<Mutex<PresetStore>>) -> Self {
-        // ---- 中文字体 ----
-        if let Some(font_bytes) = fonts::load_cjk_font() {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts
-                .font_data
-                .insert("msyh".to_owned(), Arc::new(egui::FontData::from_owned(font_bytes)));
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                if let Some(list) = fonts.families.get_mut(&family) {
-                    list.insert(0, "msyh".to_owned());
-                }
-            }
-            cc.egui_ctx.set_fonts(fonts);
-        } else {
-            info!("未找到中文字体，界面将回退系统字体");
-        }
+        // ---- 字体：内置三套（正文 / 衬线 / 粗体），**只在启动时安装一次** ----
+        let fs = fonts::install(&cc.egui_ctx);
+        info!("字体安装: sans={} serif={} bold={}", fs.sans, fs.serif, fs.bold);
 
         let (preset, active_name, lang, theme) = {
             let g = store.lock();
@@ -814,19 +1124,21 @@ impl AcajaApp {
         };
         let pal = if dark { Palette::dark() } else { Palette::light() };
 
-        // ---- 排版节奏：标题 20 / 强调 13.5 / 正文 12.5 / 说明 10.5 ----
+        // ---- 排版节奏（三族分工见文件头）----
+        // H1 26~28 serif · H2 15.5 serif · 数值 11.5~14 bold · 正文 12.5 sans · 说明 10.5 dim
         let mut style = (*cc.egui_ctx.style()).clone();
         style.text_styles = [
-            (egui::TextStyle::Heading, FontId::proportional(20.0)),
-            (egui::TextStyle::Body, FontId::proportional(12.5)),
-            (egui::TextStyle::Button, FontId::proportional(12.5)),
-            (egui::TextStyle::Small, FontId::proportional(10.5)),
+            (egui::TextStyle::Heading, f_serif(22.0)),
+            (egui::TextStyle::Body, f_sans(12.5)),
+            (egui::TextStyle::Button, f_sans(12.5)),
+            (egui::TextStyle::Small, f_sans(10.5)),
             (egui::TextStyle::Monospace, FontId::monospace(12.0)),
         ]
         .into();
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        style.spacing.button_padding = Vec2::new(10.0, 5.0);
-        style.animation_time = 0.15;
+        style.spacing.item_spacing = Vec2::new(10.0, 12.0);
+        style.spacing.button_padding = Vec2::new(12.0, 6.0);
+        // 默认控件的过渡时长与自绘控件对齐（同一条 ease-out 曲线）
+        style.animation_time = ANIM_HOVER;
         cc.egui_ctx.set_style(style);
 
         let tpl_previews = TEMPLATES
@@ -873,6 +1185,8 @@ impl AcajaApp {
             thumb_for: String::new(),
             thumb: Thumb::Empty,
             tpl_previews,
+            enter_t0: 0.0,
+            enter_now: 0.0,
         };
         app.sync_buffers();
         app
@@ -890,6 +1204,26 @@ impl AcajaApp {
         self.hex_outline = f(&self.preset.outline.color);
         self.hotkey_buf = self.preset.hotkey_toggle.to_string();
         self.hotkey_next_buf = self.preset.hotkey_next_profile.to_string();
+    }
+
+    /// 入场淡入系数（0.10→1）：卡片内部自绘的内容（预览图等）用它一起渐显
+    fn enter_alpha(&self, idx: usize) -> f32 {
+        0.10 + 0.90 * ease_out(self.enter_k(idx))
+    }
+
+    /// 第 `idx` 张卡片的入场进度（0→1；每张错峰 50ms，缓出）
+    fn enter_k(&self, idx: usize) -> f32 {
+        let t = (self.enter_now - self.enter_t0 - idx as f64 * ENTER_STAGGER as f64) / ENTER_DUR as f64;
+        t.clamp(0.0, 1.0) as f32
+    }
+
+    /// 切换分区：重置入场时钟 → 新分区内容淡入 + 轻微上移，禁止硬切
+    fn goto_section(&mut self, idx: usize) {
+        if self.active_section != idx {
+            self.active_section = idx;
+            self.enter_t0 = self.enter_now;
+            self.recording = None;
+        }
     }
 
     fn flash(&mut self, text: String) {
@@ -1020,34 +1354,47 @@ impl AcajaApp {
 
         let p = ui.painter();
         let cy = rect.center().y;
-        // 品牌标记：accent 渐变圆角方块 + 几何准星
-        let mark = Rect::from_center_size(Pos2::new(rect.left() + 17.0, cy), Vec2::splat(30.0));
+        // 品牌标记：霓虹紫 → 克莱因蓝渐变方块 + 几何准星 + 一圈紫光
+        let mark = Rect::from_center_size(Pos2::new(rect.left() + 20.0, cy), Vec2::splat(34.0));
         let mut shapes = Vec::new();
-        push_shadow(&mut shapes, mark, 9.0, pal, 0.6);
-        push_vgrad(&mut shapes, mark, 9.0, pal.accent_bright, mix(pal.accent2, pal.accent, 0.5), 4);
-        shapes.push(Shape::rect_stroke(mark, Rounding::same(9.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.6))));
+        push_shadow(&mut shapes, mark, 11.0, pal, 0.55);
+        shapes.push(Shape::rect_filled(mark.expand(3.5), Rounding::same(15.0), fade(pal.accent, 0.15)));
+        push_vgrad(&mut shapes, mark, 11.0, pal.accent_bright, mix(pal.accent_deep, pal.accent2, 0.55), 6);
+        shapes.push(Shape::rect_stroke(mark, Rounding::same(11.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.75))));
+        shapes.push(Shape::hline(
+            Rangef::new(mark.left() + 8.0, mark.right() - 8.0),
+            mark.top() + 1.2,
+            Stroke::new(1.0_f32, rgba(255, 255, 255, 120)),
+        ));
         p.add(Shape::Vec(shapes));
         let c = mark.center();
-        p.circle_stroke(c, 6.6, Stroke::new(1.4_f32, Color32::WHITE));
+        p.circle_stroke(c, 7.4, Stroke::new(1.5_f32, Color32::WHITE));
         for (dx, dy) in [(0.0_f32, -1.0_f32), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)] {
             p.line_segment(
-                [Pos2::new(c.x + dx * 4.6, c.y + dy * 4.6), Pos2::new(c.x + dx * 9.4, c.y + dy * 9.4)],
-                Stroke::new(1.4_f32, Color32::WHITE),
+                [Pos2::new(c.x + dx * 5.2, c.y + dy * 5.2), Pos2::new(c.x + dx * 10.4, c.y + dy * 10.4)],
+                Stroke::new(1.5_f32, Color32::WHITE),
             );
         }
+        // H1：衬线 26
         p.text(
-            Pos2::new(mark.right() + 11.0, cy - 6.0),
+            Pos2::new(mark.right() + 13.0, cy - 9.0),
             Align2::LEFT_CENTER,
             t(lang, "title"),
-            FontId::proportional(15.0),
+            f_serif(26.0),
             pal.text,
         );
+        // 副标题：版本号走 bold 族（粗细对比）
         p.text(
-            Pos2::new(mark.right() + 11.0, cy + 10.0),
+            Pos2::new(mark.right() + 15.0, cy + 14.0),
             Align2::LEFT_CENTER,
-            format!("{} · v{}", t(lang, "theme"), crate::VERSION),
-            FontId::proportional(10.0),
-            pal.dim,
+            format!("v{}", crate::VERSION),
+            f_bold(10.5),
+            fade(pal.dim, 0.95),
+        );
+        // 标题区底部：一条极细的镜面分隔线（不靠粗边框划分区域）
+        p.line_segment(
+            [Pos2::new(rect.left() + 4.0, rect.bottom() + 6.0), Pos2::new(rect.right() - 4.0, rect.bottom() + 6.0)],
+            Stroke::new(1.0_f32, fade(pal.glass_hi, 0.11)),
         );
 
         // 右侧控件（从右往左：关闭 / 最小化 / 最大化 / 主题 / 语言）
@@ -1115,47 +1462,62 @@ impl AcajaApp {
         }
     }
 
-    /// 左侧导航：玻璃胶囊 + accent 光条 + 几何图标
+    /// 左侧导航：玻璃轨 + 选中胶囊（克莱因蓝→霓虹紫）+ accent 光条 + 衬线序号
     fn nav_ui(&mut self, ui: &mut Ui, pal: &Palette) {
-        ui.add_space(4.0);
+        let lang = self.lang;
+        ui.add_space(2.0);
         for (idx, key) in NAV_ITEMS {
             let selected = self.active_section == idx;
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
-            let hot = ui.ctx().animate_bool_with_time(Id::new(("nav_h", idx)), resp.hovered(), 0.12);
-            let sel = ui.ctx().animate_value_with_time(Id::new(("nav_s", idx)), if selected { 1.0 } else { 0.0 }, 0.16);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
+            let hot = anim_bool(ui.ctx(), Id::new(("nav_h", idx)), resp.hovered(), ANIM_HOVER);
+            let sel = ui.ctx().animate_value_with_time(Id::new(("nav_s", idx)), if selected { 1.0 } else { 0.0 }, ANIM_VALUE);
+            // hover 抬升与选中态共用同一条曲线：位移 / 底色 / 描边同步过渡
+            let lift = HOVER_LIFT * hot * (1.0 - sel);
             let r = Rect::from_min_max(
-                Pos2::new(rect.left() + 4.0, rect.top() + 2.0),
-                Pos2::new(rect.right() - 6.0, rect.bottom() - 2.0),
+                Pos2::new(rect.left() + 2.0, rect.top() + 2.0 - lift),
+                Pos2::new(rect.right() - 4.0, rect.bottom() - 2.0 - lift),
             );
             let p = ui.painter();
             if sel > 0.01 {
-                p.rect_filled(r, Rounding::same(11.0), fade(pal.control, sel * 1.4));
-                p.rect_stroke(r, Rounding::same(11.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.20 * sel)));
+                p.rect_filled(r, Rounding::same(12.0), fade(mix(pal.accent2, pal.accent, 0.72), 0.24 * sel));
+                p.rect_stroke(r, Rounding::same(12.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.32 * sel)));
                 let bar = Rect::from_min_max(
-                    Pos2::new(r.left() + 3.0, r.center().y - 8.0 * sel),
-                    Pos2::new(r.left() + 5.6, r.center().y + 8.0 * sel),
+                    Pos2::new(r.left() + 3.0, r.center().y - 9.0 * sel),
+                    Pos2::new(r.left() + 5.4, r.center().y + 9.0 * sel),
                 );
-                p.rect_filled(bar.expand(2.2), Rounding::same(3.0), fade(pal.accent, 0.18 * sel));
-                p.rect_filled(bar, Rounding::same(1.4), fade(pal.accent, sel));
+                p.rect_filled(bar.expand(2.6), Rounding::same(3.0), fade(pal.accent, 0.20 * sel));
+                p.rect_filled(bar, Rounding::same(1.5), fade(pal.accent_bright, sel));
             } else if hot > 0.01 {
-                p.rect_filled(r, Rounding::same(11.0), fade(pal.control, hot * 0.7));
+                p.rect_filled(r, Rounding::same(12.0), fade(pal.control, 0.85 * hot));
+                p.rect_stroke(r, Rounding::same(12.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.10 * hot)));
             }
             let fg = if selected { pal.nav_fg_on } else { mix(pal.nav_fg, pal.nav_fg_on, hot) };
-            nav_glyph(p, idx, Pos2::new(r.left() + 22.0, r.center().y), if selected { pal.accent } else { fg });
+            nav_glyph(p, idx, Pos2::new(r.left() + 24.0, r.center().y), if selected { pal.accent_bright } else { fg });
+            // 标签：选中项走 bold 族（粗细对比），其余常规无衬线
+            let lf = if selected { f_bold(13.0) } else { f_sans(13.0) };
+            p.text(Pos2::new(r.left() + 40.0, r.center().y - 0.5), Align2::LEFT_CENTER, t(lang, key), lf, fg);
+            // 右侧衬线序号（01…08）
             p.text(
-                Pos2::new(r.left() + 37.0, r.center().y),
-                Align2::LEFT_CENTER,
-                t(self.lang, key),
-                FontId::proportional(12.5),
-                fg,
+                Pos2::new(r.right() - 12.0, r.center().y - 0.5),
+                Align2::RIGHT_CENTER,
+                format!("{:02}", idx + 1),
+                f_serif(11.0),
+                if selected { fade(pal.accent_bright, 0.95) } else { fade(pal.dim, 0.65 + 0.35 * hot) },
             );
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
             }
             if resp.clicked() {
-                self.active_section = idx;
+                self.goto_section(idx);
             }
         }
+        // 导航轨收尾：一条渐隐细线
+        ui.add_space(12.0);
+        let (lr, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+        ui.painter().line_segment(
+            [Pos2::new(lr.left() + 10.0, lr.center().y), Pos2::new(lr.right() - 10.0, lr.center().y)],
+            Stroke::new(1.0_f32, fade(pal.border, 0.7)),
+        );
     }
 
     /// 底部操作条：连接状态（几何圆点）+ flash 淡出 + 应用 / 退出主程序
@@ -1165,9 +1527,9 @@ impl AcajaApp {
         push_panel(&mut shapes, rect, R_CARD, pal, 0.0);
         ui.painter().add(Shape::Vec(shapes));
 
-        let inner = rect.shrink2(Vec2::new(16.0, 10.0));
+        let inner = rect.shrink2(Vec2::new(24.0, 12.0));
         let mut bui = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
-        bui.spacing_mut().item_spacing = Vec2::new(8.0, 4.0);
+        bui.spacing_mut().item_spacing = Vec2::new(10.0, 4.0);
 
         let (dot, msg, msg_color) = if self.backend_ok {
             if self.dirty {
@@ -1178,29 +1540,32 @@ impl AcajaApp {
         } else {
             (pal.warn, t(lang, "backend_file_mode"), pal.label)
         };
-        let (dr, _) = bui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+        let (dr, _) = bui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+        let con = anim_bool(bui.ctx(), Id::new("conn_ok"), self.backend_ok, ANIM_VALUE);
         let p = bui.painter();
-        p.circle_filled(dr.center(), 5.6, fade(dot, 0.20));
-        p.circle_filled(dr.center(), 3.2, dot);
-        bui.label(RichText::new(msg).size(11.0).color(msg_color));
+        // 状态点：外圈柔光随连接状态平滑过渡，不闪
+        p.circle_filled(dr.center(), 6.4, fade(dot, 0.14 + 0.08 * con));
+        p.circle_filled(dr.center(), 3.4, dot);
+        bui.label(RichText::new(msg).size(11.5).color(msg_color));
 
         let mut expire = false;
         bui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if button_sized(ui, pal, "apply", t(lang, "push_apply"), Btn::Primary, 168.0, 30.0, 13.5).clicked() {
+            if button_sized(ui, pal, "apply", t(lang, "push_apply"), Btn::Primary, 176.0, 32.0, 13.5).clicked() {
                 self.push_to_backend();
             }
-            if button_sized(ui, pal, "quit_app", t(lang, "quit_backend"), Btn::Glass, 104.0, 30.0, 12.5).clicked() {
+            if button_sized(ui, pal, "quit_app", t(lang, "quit_backend"), Btn::Glass, 108.0, 32.0, 12.5).clicked() {
                 if let Some(appdata) = crate::appdata_dir().ok() {
                     let _ = std::fs::write(appdata.join("cmd.json"), "{\"cmd\":\"quit\"}");
                     self.flash(t(lang, "quit_backend_sent").to_string());
                 }
             }
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             if let Some((text, at)) = self.status.as_ref() {
                 let el = at.elapsed().as_secs_f32();
                 if el < STATUS_TTL.as_secs_f32() {
                     let k = if el > 1.3 { (1.0 - (el - 1.3) / (STATUS_TTL.as_secs_f32() - 1.3)).clamp(0.0, 1.0) } else { 1.0 };
-                    ui.label(RichText::new(text.clone()).size(11.0).color(with_alpha(pal.ok, (255.0 * k) as u8)));
+                    // flash 提示走 bold 族：和正文拉开粗细层次
+                    ui.label(RichText::new(text.clone()).font(f_bold(11.5)).color(with_alpha(pal.ok, (255.0 * k) as u8)));
                     // 仅在淡出进行中请求重绘（静止时不空转）
                     if k < 1.0 {
                         ui.ctx().request_repaint();
@@ -1221,60 +1586,201 @@ impl AcajaApp {
 
     fn section_style(&mut self, ui: &mut Ui, pal: &Palette) {
         let lang = self.lang;
-        card(ui, pal, None, |ui| {
-            let h = 196.0;
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
-            preview::paint_preview(ui, rect, &self.preset, lang);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(t(lang, "preview")).size(10.5).color(pal.dim));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let (r, _) = ui.allocate_exact_size(Vec2::new(18.0, 18.0), Sense::hover());
-                    let (rr, gg, bb) = crate::overlay::parse_hex(&self.preset.color);
-                    let p = ui.painter();
-                    p.rect_filled(r, Rounding::same(5.0), Color32::from_rgb((rr * 255.0) as u8, (gg * 255.0) as u8, (bb * 255.0) as u8));
-                    p.rect_stroke(r, Rounding::same(5.0), Stroke::new(1.0_f32, pal.border));
-                    ui.label(
-                        RichText::new(format!("{} {:.0} · {:.1}", shape_name(lang, self.preset.shape), self.preset.size, self.preset.thickness))
-                            .size(10.5)
-                            .color(pal.label),
+        // ---- 01 主视觉（跨 2 列）：左 62% 实时预览 / 右 38% 当前参数读数 ----
+        card(ui, pal, "hero", "", self.enter_k(0), None, |ui, pal| {
+            row2(ui, 0.62, |lu, ru| {
+                let h = 238.0;
+                let (rect, _) = lu.allocate_exact_size(Vec2::new(lu.available_width(), h), Sense::hover());
+                preview::paint_preview(lu, rect, &self.preset, lang, self.enter_alpha(0));
+                let (cap, _) = lu.allocate_exact_size(Vec2::new(lu.available_width(), 20.0), Sense::hover());
+                lu.painter().text(
+                    cap.left_center(),
+                    Align2::LEFT_CENTER,
+                    t(lang, "preview"),
+                    f_sans(10.5),
+                    pal.dim,
+                );
+                lu.painter().text(
+                    cap.right_center(),
+                    Align2::RIGHT_CENTER,
+                    format!("{}×{}", lu.available_width() as i32, h as i32),
+                    f_bold(10.5),
+                    fade(pal.dim, 0.9),
+                );
+
+                // 右列：读数（形状名走衬线、数值走 bold —— 粗细对比最明显的地方）
+                ru.add_space(6.0);
+                ru.label(
+                    RichText::new(shape_name(lang, self.preset.shape))
+                        .font(f_serif(21.0))
+                        .color(pal.text),
+                );
+                ru.add_space(10.0);
+                for (k, v) in [
+                    (t(lang, "size"), format!("{:.0}", self.preset.size)),
+                    (t(lang, "thickness"), format!("{:.1}", self.preset.thickness)),
+                    (t(lang, "opacity"), format!("{:.2}", self.preset.opacity)),
+                ] {
+                    let (rr, _) = ru.allocate_exact_size(Vec2::new(ru.available_width(), 26.0), Sense::hover());
+                    let p = ru.painter();
+                    p.text(rr.left_center(), Align2::LEFT_CENTER, k, f_sans(11.5), pal.dim);
+                    p.text(rr.right_center(), Align2::RIGHT_CENTER, v, f_bold(14.0), pal.text);
+                }
+                ru.add_space(8.0);
+                // 颜色条：单色模式一块，多色模式四象限并列
+                let swatches: Vec<String> = if self.preset.multicolor {
+                    vec![
+                        self.preset.colors.top.clone(),
+                        self.preset.colors.bottom.clone(),
+                        self.preset.colors.left.clone(),
+                        self.preset.colors.right.clone(),
+                    ]
+                } else {
+                    vec![self.preset.color.clone()]
+                };
+                let (sr, _) = ru.allocate_exact_size(Vec2::new(ru.available_width(), 26.0), Sense::hover());
+                let p = ru.painter();
+                let n = swatches.len() as f32;
+                let gap = 8.0;
+                let w = ((sr.width() - gap * (n - 1.0)) / n).max(14.0);
+                for (i, hex) in swatches.iter().enumerate() {
+                    let (r, g, b) = crate::overlay::parse_hex(hex);
+                    let cell = Rect::from_min_size(
+                        Pos2::new(sr.left() + i as f32 * (w + gap), sr.top() + 3.0),
+                        Vec2::new(w, 20.0),
                     );
-                });
+                    p.rect_filled(cell, Rounding::same(6.0), Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8));
+                    p.rect_stroke(cell, Rounding::same(6.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.55)));
+                }
             });
         });
 
-        // ---- 模板画廊（8 个缩略图） ----
-        card(ui, pal, Some(t(lang, "templates")), |ui| {
+        // ---- 02 形状与样式（窄栏）/ 03 颜色与描边（宽栏）：1+1 的不对称一行 ----
+        row2(ui, 0.58, |lu, ru| {
+            card(lu, pal, "s_shape", "01/03", self.enter_k(1), Some(t(lang, "shape_style")), |ui, pal| {
+                ui.horizontal(|ui| {
+                    field_label(ui, pal, t(lang, "shape"));
+                    let w = ui.available_width() - 4.0;
+                    let cur = shape_name(lang, self.preset.shape);
+                    let mut picked: Option<CrossShape> = None;
+                    combo(ui, w.max(140.0), "shape_glass", cur.to_string(), |ui| {
+                        for s in CrossShape::ALL {
+                            if ui.selectable_label(self.preset.shape == s, shape_name(lang, s)).clicked() {
+                                picked = Some(s);
+                            }
+                        }
+                    });
+                    if let Some(s) = picked {
+                        self.preset.shape = s;
+                        self.dirty = true;
+                    }
+                });
+                if slider_row(ui, pal, t(lang, "size"), |ui, w| {
+                    slider_f32(ui, pal, "size", &mut self.preset.size, Rangef::new(1.0, 200.0), w, 0, "")
+                }) {
+                    self.dirty = true;
+                }
+                if slider_row(ui, pal, t(lang, "thickness"), |ui, w| {
+                    slider_f32(ui, pal, "thick", &mut self.preset.thickness, Rangef::new(0.2, 20.0), w, 1, "")
+                }) {
+                    self.dirty = true;
+                }
+                if slider_row(ui, pal, t(lang, "opacity"), |ui, w| {
+                    slider_f32(ui, pal, "op", &mut self.preset.opacity, Rangef::new(0.05, 1.0), w, 2, "")
+                }) {
+                    self.dirty = true;
+                }
+                if slider_row(ui, pal, t(lang, "rotation"), |ui, w| {
+                    slider_f32(ui, pal, "rot", &mut self.preset.rotation, Rangef::new(0.0, 360.0), w, 0, "°")
+                }) {
+                    self.dirty = true;
+                }
+                let has_gap = matches!(
+                    self.preset.shape,
+                    CrossShape::HollowCross | CrossShape::HollowSquare | CrossShape::HollowCrossDot | CrossShape::GapHair
+                );
+                if has_gap {
+                    ui.add_space(4.0);
+                    if slider_row(ui, pal, t(lang, "hollow_gap"), |ui, w| {
+                        slider_f32(ui, pal, "gap", &mut self.preset.hollow.gap, Rangef::new(0.0, 80.0), w, 0, "")
+                    }) {
+                        self.dirty = true;
+                    }
+                    if matches!(self.preset.shape, CrossShape::HollowCrossDot | CrossShape::GapHair)
+                        && slider_row(ui, pal, t(lang, "center_dot"), |ui, w| {
+                            slider_f32(ui, pal, "cds", &mut self.preset.hollow.center_dot_size, Rangef::new(1.0, 30.0), w, 1, "")
+                        })
+                    {
+                        self.dirty = true;
+                    }
+                }
+            });
+
+            card(ru, pal, "s_color", "02/03", self.enter_k(2), Some(t(lang, "color_outline")), |ui, pal| {
+                if checkbox(ui, pal, "multicolor", &mut self.preset.multicolor, t(lang, "multicolor")) {
+                    self.dirty = true;
+                }
+                ui.add_space(4.0);
+                if self.preset.multicolor {
+                    if color_row_ui(ui, pal, t(lang, "color_top"), &mut self.hex_top, &mut self.preset.colors.top) { self.dirty = true; }
+                    if color_row_ui(ui, pal, t(lang, "color_bottom"), &mut self.hex_bottom, &mut self.preset.colors.bottom) { self.dirty = true; }
+                    if color_row_ui(ui, pal, t(lang, "color_left"), &mut self.hex_left, &mut self.preset.colors.left) { self.dirty = true; }
+                    if color_row_ui(ui, pal, t(lang, "color_right"), &mut self.hex_right, &mut self.preset.colors.right) { self.dirty = true; }
+                } else if color_row_ui(ui, pal, t(lang, "main_color"), &mut self.hex_main, &mut self.preset.color) {
+                    self.dirty = true;
+                }
+                ui.add_space(8.0);
+                if checkbox(ui, pal, "outline", &mut self.preset.outline.enabled, t(lang, "outline")) {
+                    self.dirty = true;
+                }
+                if self.preset.outline.enabled {
+                    if slider_row(ui, pal, t(lang, "outline_thickness"), |ui, w| {
+                        slider_f32(ui, pal, "ot", &mut self.preset.outline.thickness, Rangef::new(0.5, 10.0), w, 1, "")
+                    }) {
+                        self.dirty = true;
+                    }
+                    if color_row_ui(ui, pal, t(lang, "outline_color"), &mut self.hex_outline, &mut self.preset.outline.color) {
+                        self.dirty = true;
+                    }
+                    if slider_row(ui, pal, t(lang, "outline_opacity"), |ui, w| {
+                        slider_f32(ui, pal, "oo", &mut self.preset.outline.opacity, Rangef::new(0.1, 1.0), w, 2, "")
+                    }) {
+                        self.dirty = true;
+                    }
+                }
+            });
+        });
+
+        // ---- 04 模板画廊（跨 2 列）----
+        card(ui, pal, "s_tpl", "03/03", self.enter_k(3), Some(t(lang, "templates")), |ui, pal| {
             note(ui, pal, t(lang, "templates_hint"));
+            ui.add_space(6.0);
             let cols = 4usize;
-            let gap = 10.0;
+            let gap = 14.0;
             let avail = ui.available_width();
-            let cell_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor().max(80.0);
+            let cell_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor().max(90.0);
             for row in 0..TEMPLATES.len().div_ceil(cols) {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
                     for col in 0..cols {
                         let i = row * cols + col;
                         if i >= TEMPLATES.len() {
                             break;
                         }
                         let (key, _) = TEMPLATES[i];
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(cell_w, 96.0), Sense::click());
-                        let hot = ui.ctx().animate_bool_with_time(Id::new(("tpl", i)), resp.hovered(), 0.14);
-                        let c = rect.translate(Vec2::new(0.0, -2.0 * hot));
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(cell_w, 104.0), Sense::click());
+                        let hot = anim_bool(ui.ctx(), Id::new(("tpl", i)), resp.hovered(), ANIM_HOVER);
+                        let c = rect.translate(Vec2::new(0.0, -3.0 * hot));
                         let mut shapes = Vec::new();
-                        push_panel(&mut shapes, c, 12.0, pal, hot);
-                        shapes.push(Shape::rect_stroke(
-                            c,
-                            Rounding::same(12.0),
-                            Stroke::new(1.0_f32, fade(pal.accent, hot * 0.8)),
-                        ));
+                        push_panel(&mut shapes, c, 14.0, pal, hot);
                         ui.painter().add(Shape::Vec(shapes));
-                        let prev = Rect::from_min_max(Pos2::new(c.left() + 5.0, c.top() + 5.0), Pos2::new(c.right() - 5.0, c.top() + 62.0));
-                        preview::paint_preview_cells(ui, prev, &self.tpl_previews[i], lang, 16.0);
+                        let prev = Rect::from_min_max(Pos2::new(c.left() + 6.0, c.top() + 6.0), Pos2::new(c.right() - 6.0, c.top() + 66.0));
+                        preview::paint_preview_cells(ui, prev, &self.tpl_previews[i], lang, 16.0, self.enter_alpha(3));
                         ui.painter().text(
-                            Pos2::new(c.center().x, c.bottom() - 17.0),
+                            Pos2::new(c.center().x, c.bottom() - 18.0),
                             Align2::CENTER_CENTER,
                             ellipsize(t(lang, key), 12),
-                            FontId::proportional(11.0),
+                            if hot > 0.5 { f_bold(11.0) } else { f_sans(11.0) },
                             mix(pal.label, pal.text, hot),
                         );
                         if resp.clicked() {
@@ -1283,123 +1789,50 @@ impl AcajaApp {
                             self.dirty = true;
                             self.flash(t(lang, "template_applied").to_string());
                         }
-                    }
-                });
-            }
-        });
-
-        // ---- 形状与样式 ----
-        card(ui, pal, Some(t(lang, "shape_style")), |ui| {
-            ui.horizontal(|ui| {
-                field_label(ui, pal, t(lang, "shape"), LABEL_W);
-                let w = ui.available_width() - 4.0;
-                let cur = shape_name(lang, self.preset.shape);
-                let mut picked: Option<CrossShape> = None;
-                combo(ui, w.max(140.0), "shape_glass", cur.to_string(), |ui| {
-                    for s in CrossShape::ALL {
-                        if ui.selectable_label(self.preset.shape == s, shape_name(lang, s)).clicked() {
-                            picked = Some(s);
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                         }
                     }
                 });
-                if let Some(s) = picked {
-                    self.preset.shape = s;
-                    self.dirty = true;
-                }
-            });
-            if slider_row(ui, pal, t(lang, "size"), |ui, w| {
-                slider_f32(ui, pal, "size", &mut self.preset.size, Rangef::new(1.0, 200.0), w, 0, "")
-            }) {
-                self.dirty = true;
-            }
-            if slider_row(ui, pal, t(lang, "thickness"), |ui, w| {
-                slider_f32(ui, pal, "thick", &mut self.preset.thickness, Rangef::new(0.2, 20.0), w, 1, "")
-            }) {
-                self.dirty = true;
-            }
-            if slider_row(ui, pal, t(lang, "opacity"), |ui, w| {
-                slider_f32(ui, pal, "op", &mut self.preset.opacity, Rangef::new(0.05, 1.0), w, 2, "")
-            }) {
-                self.dirty = true;
-            }
-            if slider_row(ui, pal, t(lang, "rotation"), |ui, w| {
-                slider_f32(ui, pal, "rot", &mut self.preset.rotation, Rangef::new(0.0, 360.0), w, 0, "°")
-            }) {
-                self.dirty = true;
-            }
-            if checkbox(ui, pal, "multicolor", &mut self.preset.multicolor, t(lang, "multicolor")) {
-                self.dirty = true;
-            }
-            ui.add_space(2.0);
-            if self.preset.multicolor {
-                if color_row_ui(ui, pal, t(lang, "color_top"), &mut self.hex_top, &mut self.preset.colors.top) { self.dirty = true; }
-                if color_row_ui(ui, pal, t(lang, "color_bottom"), &mut self.hex_bottom, &mut self.preset.colors.bottom) { self.dirty = true; }
-                if color_row_ui(ui, pal, t(lang, "color_left"), &mut self.hex_left, &mut self.preset.colors.left) { self.dirty = true; }
-                if color_row_ui(ui, pal, t(lang, "color_right"), &mut self.hex_right, &mut self.preset.colors.right) { self.dirty = true; }
-            } else if color_row_ui(ui, pal, t(lang, "main_color"), &mut self.hex_main, &mut self.preset.color) {
-                self.dirty = true;
-            }
-
-            let has_gap = matches!(
-                self.preset.shape,
-                CrossShape::HollowCross | CrossShape::HollowSquare | CrossShape::HollowCrossDot | CrossShape::GapHair
-            );
-            if has_gap {
-                ui.add_space(2.0);
-                if slider_row(ui, pal, t(lang, "hollow_gap"), |ui, w| {
-                    slider_f32(ui, pal, "gap", &mut self.preset.hollow.gap, Rangef::new(0.0, 80.0), w, 0, "")
-                }) {
-                    self.dirty = true;
-                }
-                if matches!(self.preset.shape, CrossShape::HollowCrossDot | CrossShape::GapHair)
-                    && slider_row(ui, pal, t(lang, "center_dot"), |ui, w| {
-                        slider_f32(ui, pal, "cds", &mut self.preset.hollow.center_dot_size, Rangef::new(1.0, 30.0), w, 1, "")
-                    })
-                {
-                    self.dirty = true;
-                }
-            }
-
-            ui.add_space(4.0);
-            if checkbox(ui, pal, "outline", &mut self.preset.outline.enabled, t(lang, "outline")) {
-                self.dirty = true;
-            }
-            if self.preset.outline.enabled {
-                if slider_row(ui, pal, t(lang, "outline_thickness"), |ui, w| {
-                    slider_f32(ui, pal, "ot", &mut self.preset.outline.thickness, Rangef::new(0.5, 10.0), w, 1, "")
-                }) {
-                    self.dirty = true;
-                }
-                if color_row_ui(ui, pal, t(lang, "outline_color"), &mut self.hex_outline, &mut self.preset.outline.color) {
-                    self.dirty = true;
-                }
-                if slider_row(ui, pal, t(lang, "outline_opacity"), |ui, w| {
-                    slider_f32(ui, pal, "oo", &mut self.preset.outline.opacity, Rangef::new(0.1, 1.0), w, 2, "")
-                }) {
-                    self.dirty = true;
-                }
             }
         });
     }
 
     fn section_dynamic(&mut self, ui: &mut Ui, pal: &Palette) {
         let lang = self.lang;
-        card(ui, pal, Some(t(lang, "dynamic")), |ui| {
-            if slider_row(ui, pal, t(lang, "fire_expand"), |ui, w| {
-                slider_f32(ui, pal, "fe", &mut self.preset.dynamic.fire_expand_px, Rangef::new(0.0, 80.0), w, 0, "px")
-            }) {
-                self.dirty = true;
-            }
-            let mut rec = self.preset.dynamic.recover_ms as i32;
-            if slider_row(ui, pal, t(lang, "recover_ms"), |ui, w| {
-                slider_i32(ui, pal, "rm", &mut rec, Rangef::new(20.0, 500.0), w)
-            }) {
-                self.preset.dynamic.recover_ms = rec.max(1) as u32;
-                self.dirty = true;
-            }
-            if checkbox(ui, pal, "recoil", &mut self.preset.dynamic.recoil_indicator, t(lang, "recoil_indicator")) {
-                self.dirty = true;
-            }
+        // ---- 05 动态准星：左 60% 参数 / 右 40% 开火扩散后的形态预览 ----
+        card(ui, pal, "dynamic", "", self.enter_k(0), Some(t(lang, "dynamic")), |ui, pal| {
+            row2(ui, 0.60, |lu, ru| {
+                if slider_row(lu, pal, t(lang, "fire_expand"), |ui, w| {
+                    slider_f32(ui, pal, "fe", &mut self.preset.dynamic.fire_expand_px, Rangef::new(0.0, 80.0), w, 0, "px")
+                }) {
+                    self.dirty = true;
+                }
+                let mut rec = self.preset.dynamic.recover_ms as i32;
+                if slider_row(lu, pal, t(lang, "recover_ms"), |ui, w| {
+                    slider_i32(ui, pal, "rm", &mut rec, Rangef::new(20.0, 500.0), w)
+                }) {
+                    self.preset.dynamic.recover_ms = rec.max(1) as u32;
+                    self.dirty = true;
+                }
+                if checkbox(lu, pal, "recoil", &mut self.preset.dynamic.recoil_indicator, t(lang, "recoil_indicator")) {
+                    self.dirty = true;
+                }
+
+                // 右列：把「开火扩散量」叠加到几何上的形态（复用主预览绘制，不新增逻辑）
+                let (pr, _) = ru.allocate_exact_size(Vec2::new(ru.available_width(), 152.0), Sense::hover());
+                preview::paint_preview_expanded(ru, pr, &self.preset, lang, self.preset.dynamic.fire_expand_px, self.enter_alpha(0));
+                let (cap, _) = ru.allocate_exact_size(Vec2::new(ru.available_width(), 22.0), Sense::hover());
+                let p = ru.painter();
+                p.text(cap.left_center(), Align2::LEFT_CENTER, t(lang, "fire_expand"), f_sans(10.5), pal.dim);
+                p.text(
+                    cap.right_center(),
+                    Align2::RIGHT_CENTER,
+                    format!("+{:.0}px", self.preset.dynamic.fire_expand_px),
+                    f_bold(13.0),
+                    mix(pal.text, pal.accent_bright, 0.25),
+                );
+            });
         });
     }
 
@@ -1412,37 +1845,60 @@ impl AcajaApp {
             self.monitors_at = Some(Instant::now());
         }
         let monitors = self.monitors.clone();
-        card(ui, pal, Some(t(lang, "position")), |ui| {
-            ui.horizontal(|ui| {
-                field_label(ui, pal, t(lang, "monitors_title"), LABEL_W);
-                if button_sized(ui, pal, "mon_refresh", t(lang, "monitor_refresh"), Btn::Ghost, 0.0, 22.0, 11.0).clicked() {
-                    self.monitors = crate::system::monitor::monitors();
-                    self.monitors_at = Some(Instant::now());
-                }
-            });
-            // 跟随前台窗口
-            if monitor_row(ui, pal, self.preset.position.monitor == -1, t(lang, "monitor_follow"), None) {
-                self.preset.position.monitor = -1;
-                self.dirty = true;
-            }
-            for (i, m) in monitors.iter().enumerate() {
-                let w = m.rect.2 - m.rect.0;
-                let h = m.rect.3 - m.rect.1;
-                let mut label = format!("{} {} · {}×{}", t(lang, "monitor"), i + 1, w, h);
-                if m.primary {
-                    label.push_str(" · ");
-                    label.push_str(t(lang, "monitor_primary"));
-                }
-                if monitor_row(ui, pal, self.preset.position.monitor == i as i32, &label, Some(m)) {
-                    self.preset.position.monitor = i as i32;
+        // ---- 06 位置：左 56% 显示器列表 / 右 44% 坐标与吸附 ----
+        card(ui, pal, "position", "", self.enter_k(0), Some(t(lang, "position")), |ui, pal| {
+            row2(ui, 0.56, |lu, ru| {
+                // 左列：显示器列表
+                lu.horizontal(|ui| {
+                    field_label(ui, pal, t(lang, "monitors_title"));
+                    if button_sized(ui, pal, "mon_refresh", t(lang, "monitor_refresh"), Btn::Ghost, 0.0, 22.0, 11.0).clicked() {
+                        self.monitors = crate::system::monitor::monitors();
+                        self.monitors_at = Some(Instant::now());
+                    }
+                });
+                // 跟随前台窗口
+                if monitor_row(lu, pal, self.preset.position.monitor == -1, t(lang, "monitor_follow"), None) {
+                    self.preset.position.monitor = -1;
                     self.dirty = true;
                 }
-            }
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                if button_sized(ui, pal, "mon_center", t(lang, "center_on_monitor"), Btn::Glass, 0.0, 26.0, 12.0).clicked() {
-                    self.preset.position.x = PosVal::Center;
-                    self.preset.position.y = PosVal::Center;
+                for (i, m) in monitors.iter().enumerate() {
+                    let w = m.rect.2 - m.rect.0;
+                    let h = m.rect.3 - m.rect.1;
+                    let mut label = format!("{} {} · {}×{}", t(lang, "monitor"), i + 1, w, h);
+                    if m.primary {
+                        label.push_str(" · ");
+                        label.push_str(t(lang, "monitor_primary"));
+                    }
+                    if monitor_row(lu, pal, self.preset.position.monitor == i as i32, &label, Some(m)) {
+                        self.preset.position.monitor = i as i32;
+                        self.dirty = true;
+                    }
+                }
+
+                // 右列：坐标 + 居中 + 吸附（窄栏里每项各占一行，控件不会被挤扁）
+                let mut x = match self.preset.position.x {
+                    PosVal::Px(v) => v as i32,
+                    PosVal::Center => 0,
+                };
+                let mut y = match self.preset.position.y {
+                    PosVal::Px(v) => v as i32,
+                    PosVal::Center => 0,
+                };
+                let mut moved = false;
+                if coord_row(ru, pal, t(lang, "pos_x"), &mut x) {
+                    moved = true;
+                }
+                if coord_row(ru, pal, t(lang, "pos_y"), &mut y) {
+                    moved = true;
+                }
+                if moved {
+                    self.preset.position.x = PosVal::Px(x as f32);
+                    self.preset.position.y = PosVal::Px(y as f32);
+                    self.dirty = true;
+                }
+                ru.add_space(6.0);
+                if button_sized(ru, pal, "mon_center", t(lang, "center_on_monitor"), Btn::Glass, 0.0, 28.0, 12.0).clicked() {
+                    // 用相对该屏的像素值锁死中心（Center 会跟随主屏/前台窗口，这里显式写点）
                     let sel = self.preset.position.monitor;
                     let target = if sel < 0 {
                         crate::system::monitor::primary().map(|m| m.work_center()).unwrap_or((0, 0))
@@ -1453,146 +1909,134 @@ impl AcajaApp {
                             .map(|m| m.work_center())
                             .unwrap_or((0, 0))
                     };
-                    // 用相对该屏的像素值锁死中心（Center 也会跟随主屏/前台窗口，这里显式写点）
                     self.preset.position.x = PosVal::Px(target.0 as f32);
                     self.preset.position.y = PosVal::Px(target.1 as f32);
                     self.dirty = true;
                     self.flash(t(lang, "center_on_monitor").to_string());
                 }
-                if button_sized(ui, pal, "mon_reset", t(lang, "center_btn"), Btn::Ghost, 0.0, 26.0, 12.0).clicked() {
+                if button_sized(ru, pal, "mon_reset", t(lang, "center_btn"), Btn::Ghost, 0.0, 28.0, 12.0).clicked() {
                     self.preset.position.x = PosVal::Center;
                     self.preset.position.y = PosVal::Center;
                     self.dirty = true;
                 }
-            });
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                field_label(ui, pal, t(lang, "pos_x"), LABEL_W);
-                let mut x = match self.preset.position.x {
-                    PosVal::Px(v) => v as i32,
-                    PosVal::Center => 0,
-                };
-                let mut y = match self.preset.position.y {
-                    PosVal::Px(v) => v as i32,
-                    PosVal::Center => 0,
-                };
-                let w = (ui.available_width() - 90.0) / 2.0;
-                let mut changed = false;
-                ui.scope(|ui| {
-                    apply_style(ui, pal);
-                    if ui.add_sized(Vec2::new(w.max(70.0), 24.0), egui::DragValue::new(&mut x).speed(2.0)).changed() {
-                        changed = true;
-                    }
-                    ui.label(RichText::new(t(lang, "pos_y")).size(12.0).color(pal.label));
-                    if ui.add_sized(Vec2::new(w.max(70.0), 24.0), egui::DragValue::new(&mut y).speed(2.0)).changed() {
-                        changed = true;
-                    }
-                });
-                if changed {
-                    self.preset.position.x = PosVal::Px(x as f32);
-                    self.preset.position.y = PosVal::Px(y as f32);
+                ru.add_space(8.0);
+                if checkbox(ru, pal, "snap", &mut self.preset.snap_to_window, t(lang, "snap_to_window")) {
                     self.dirty = true;
                 }
+                ru.add_space(4.0);
+                note(ru, pal, t(lang, "snap_note"));
             });
-            if checkbox(ui, pal, "snap", &mut self.preset.snap_to_window, t(lang, "snap_to_window")) {
-                self.dirty = true;
-            }
-            note(ui, pal, t(lang, "snap_note"));
         });
     }
 
     fn section_gamepad(&mut self, ui: &mut Ui, pal: &Palette) {
         let lang = self.lang;
-        card(ui, pal, Some(t(lang, "gamepad")), |ui| {
-            ui.horizontal(|ui| {
-                field_label(ui, pal, t(lang, "ads_mode"), LABEL_W);
-                let mut picked: Option<AdsMode> = None;
-                combo(ui, 130.0, "ads_mode_glass", ads_mode_name(lang, self.preset.gamepad.ads_mode).to_string(), |ui| {
-                    for m in [AdsMode::Off, AdsMode::HoldHide, AdsMode::Toggle, AdsMode::HoldShow] {
-                        if ui.selectable_label(self.preset.gamepad.ads_mode == m, ads_mode_name(lang, m)).clicked() {
-                            picked = Some(m);
-                        }
-                    }
-                });
-                if let Some(m) = picked {
-                    self.preset.gamepad.ads_mode = m;
-                    self.dirty = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                field_label(ui, pal, t(lang, "ads_button"), LABEL_W);
-                let cur = match self.preset.gamepad.ads_button {
-                    AdsButton::LeftTrigger => t(lang, "ads_left_trigger"),
-                    AdsButton::RightTrigger => t(lang, "ads_right_trigger"),
-                    AdsButton::LeftBumper => t(lang, "ads_left_bumper"),
-                    AdsButton::RightBumper => t(lang, "ads_right_bumper"),
-                };
-                let mut picked: Option<AdsButton> = None;
-                combo(ui, 170.0, "ads_btn_glass", cur.to_string(), |ui| {
-                    for b in [AdsButton::LeftTrigger, AdsButton::RightTrigger, AdsButton::LeftBumper, AdsButton::RightBumper] {
-                        if ui.selectable_label(self.preset.gamepad.ads_button == b, ads_button_name(lang, b)).clicked() {
-                            picked = Some(b);
-                        }
-                    }
-                });
-                if let Some(b) = picked {
-                    self.preset.gamepad.ads_button = b;
-                    self.dirty = true;
-                }
-            });
-            let mut thr = self.preset.gamepad.trigger_threshold as i32;
-            if slider_row(ui, pal, t(lang, "trigger_threshold"), |ui, w| {
-                slider_i32(ui, pal, "thr", &mut thr, Rangef::new(0.0, 255.0), w)
-            }) {
-                self.preset.gamepad.trigger_threshold = thr.clamp(0, 255) as u8;
-                self.dirty = true;
-            }
-            if checkbox(ui, pal, "gp_fire", &mut self.preset.gamepad.fire_expand, t(lang, "gamepad_fire_expand")) {
-                self.dirty = true;
-            }
-            note(ui, pal, t(lang, "gamepad_note"));
-        });
-    }
-
-    fn section_hotkey(&mut self, ui: &mut Ui, pal: &Palette) {
-        let lang = self.lang;
-        card(ui, pal, Some(t(lang, "hotkey")), |ui| {
-            let toggle = self.preset.hotkey_toggle;
-            self.hotkey_field(ui, pal, 0, t(lang, "hotkey_toggle"), toggle);
-            let next = self.preset.hotkey_next_profile;
-            self.hotkey_field(ui, pal, 1, t(lang, "hotkey_next"), next);
-            note(ui, pal, t(lang, "hotkey_note"));
-            ui.add_space(4.0);
-            if checkbox(ui, pal, "rc_toggle", &mut self.preset.right_click_toggle, t(lang, "right_click")) {
-                self.dirty = true;
-            }
-            if self.preset.right_click_toggle {
-                ui.horizontal(|ui| {
-                    field_label(ui, pal, t(lang, "right_click_mode"), LABEL_W);
-                    let cur = match self.preset.right_click_mode {
-                        RightClickMode::Click => t(lang, "rc_click"),
-                        RightClickMode::HoldShow => t(lang, "rc_hold_show"),
-                        RightClickMode::HoldHide => t(lang, "rc_hold_hide"),
-                    };
-                    let mut picked: Option<RightClickMode> = None;
-                    combo(ui, 140.0, "rc_mode_glass", cur.to_string(), |ui| {
-                        for (m, k) in [
-                            (RightClickMode::Click, "rc_click"),
-                            (RightClickMode::HoldShow, "rc_hold_show"),
-                            (RightClickMode::HoldHide, "rc_hold_hide"),
-                        ] {
-                            if ui.selectable_label(self.preset.right_click_mode == m, t(lang, k)).clicked() {
+        // ---- 07 手柄：左 58% 参数 / 右 42% 手柄图示 + 说明 ----
+        card(ui, pal, "gamepad", "", self.enter_k(0), Some(t(lang, "gamepad")), |ui, pal| {
+            row2(ui, 0.58, |lu, ru| {
+                lu.horizontal(|ui| {
+                    field_label(ui, pal, t(lang, "ads_mode"));
+                    let mut picked: Option<AdsMode> = None;
+                    combo(ui, 150.0, "ads_mode_glass", ads_mode_name(lang, self.preset.gamepad.ads_mode).to_string(), |ui| {
+                        for m in [AdsMode::Off, AdsMode::HoldHide, AdsMode::Toggle, AdsMode::HoldShow] {
+                            if ui.selectable_label(self.preset.gamepad.ads_mode == m, ads_mode_name(lang, m)).clicked() {
                                 picked = Some(m);
                             }
                         }
                     });
                     if let Some(m) = picked {
-                        self.preset.right_click_mode = m;
+                        self.preset.gamepad.ads_mode = m;
                         self.dirty = true;
                     }
                 });
-            }
+                lu.horizontal(|ui| {
+                    field_label(ui, pal, t(lang, "ads_button"));
+                    let cur = match self.preset.gamepad.ads_button {
+                        AdsButton::LeftTrigger => t(lang, "ads_left_trigger"),
+                        AdsButton::RightTrigger => t(lang, "ads_right_trigger"),
+                        AdsButton::LeftBumper => t(lang, "ads_left_bumper"),
+                        AdsButton::RightBumper => t(lang, "ads_right_bumper"),
+                    };
+                    let mut picked: Option<AdsButton> = None;
+                    let w = (ui.available_width() - 4.0).min(176.0);
+                    combo(ui, w.max(140.0), "ads_btn_glass", cur.to_string(), |ui| {
+                        for b in [AdsButton::LeftTrigger, AdsButton::RightTrigger, AdsButton::LeftBumper, AdsButton::RightBumper] {
+                            if ui.selectable_label(self.preset.gamepad.ads_button == b, ads_button_name(lang, b)).clicked() {
+                                picked = Some(b);
+                            }
+                        }
+                    });
+                    if let Some(b) = picked {
+                        self.preset.gamepad.ads_button = b;
+                        self.dirty = true;
+                    }
+                });
+                let mut thr = self.preset.gamepad.trigger_threshold as i32;
+                if slider_row(lu, pal, t(lang, "trigger_threshold"), |ui, w| {
+                    slider_i32(ui, pal, "thr", &mut thr, Rangef::new(0.0, 255.0), w)
+                }) {
+                    self.preset.gamepad.trigger_threshold = thr.clamp(0, 255) as u8;
+                    self.dirty = true;
+                }
+                if checkbox(lu, pal, "gp_fire", &mut self.preset.gamepad.fire_expand, t(lang, "gamepad_fire_expand")) {
+                    self.dirty = true;
+                }
+
+                // 右列：手柄图示（几何绘制）+ 说明（窄栏里折行更好读）
+                let (gr, _) = ru.allocate_exact_size(Vec2::new(ru.available_width(), 74.0), Sense::hover());
+                gamepad_glyph(ru.painter(), gr.center(), pal);
+                ru.add_space(6.0);
+                note(ru, pal, t(lang, "gamepad_note"));
+            });
+        });
+    }
+
+    fn section_hotkey(&mut self, ui: &mut Ui, pal: &Palette) {
+        let lang = self.lang;
+        // ---- 08 热键（宽栏）/ 09 右键（窄栏）----
+        row2(ui, 0.60, |lu, ru| {
+            card(lu, pal, "hotkey", "01/02", self.enter_k(0), Some(t(lang, "hotkey")), |ui, pal| {
+                let toggle = self.preset.hotkey_toggle;
+                self.hotkey_field(ui, pal, 0, t(lang, "hotkey_toggle"), toggle);
+                let next = self.preset.hotkey_next_profile;
+                self.hotkey_field(ui, pal, 1, t(lang, "hotkey_next"), next);
+                ui.add_space(4.0);
+                note(ui, pal, t(lang, "hotkey_note"));
+            });
+
+            card(ru, pal, "rclick", "02/02", self.enter_k(1), Some(t(lang, "right_click")), |ui, pal| {
+                if checkbox(ui, pal, "rc_toggle", &mut self.preset.right_click_toggle, t(lang, "right_click")) {
+                    self.dirty = true;
+                }
+                if self.preset.right_click_toggle {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        field_label(ui, pal, t(lang, "right_click_mode"));
+                        let cur = match self.preset.right_click_mode {
+                            RightClickMode::Click => t(lang, "rc_click"),
+                            RightClickMode::HoldShow => t(lang, "rc_hold_show"),
+                            RightClickMode::HoldHide => t(lang, "rc_hold_hide"),
+                        };
+                        let mut picked: Option<RightClickMode> = None;
+                        let w = (ui.available_width() - 4.0).min(150.0);
+                        combo(ui, w.max(120.0), "rc_mode_glass", cur.to_string(), |ui| {
+                            for (m, k) in [
+                                (RightClickMode::Click, "rc_click"),
+                                (RightClickMode::HoldShow, "rc_hold_show"),
+                                (RightClickMode::HoldHide, "rc_hold_hide"),
+                            ] {
+                                if ui.selectable_label(self.preset.right_click_mode == m, t(lang, k)).clicked() {
+                                    picked = Some(m);
+                                }
+                            }
+                        });
+                        if let Some(m) = picked {
+                            self.preset.right_click_mode = m;
+                            self.dirty = true;
+                        }
+                    });
+                }
+            });
         });
     }
 
@@ -1601,7 +2045,7 @@ impl AcajaApp {
         let lang = self.lang;
         let recording = self.recording == Some(slot);
         ui.horizontal(|ui| {
-            field_label(ui, pal, label, LABEL_W);
+            field_label(ui, pal, label);
             let avail = ui.available_width();
             let text = if recording {
                 t(lang, "hotkey_recording").to_string()
@@ -1610,7 +2054,7 @@ impl AcajaApp {
             } else {
                 hk.to_string()
             };
-            let resp = key_box(ui, pal, slot, &text, (avail - 104.0).max(140.0), recording, hk.is_empty() && !recording);
+            let resp = key_box(ui, pal, slot, &text, (avail - 96.0).max(118.0), recording, hk.is_empty() && !recording);
             if resp.clicked() {
                 self.recording = if recording { None } else { Some(slot) };
                 if self.recording.is_some() {
@@ -1629,7 +2073,7 @@ impl AcajaApp {
             }
         });
         ui.horizontal(|ui| {
-            field_label(ui, pal, t(lang, "hotkey_manual"), LABEL_W);
+            field_label(ui, pal, t(lang, "hotkey_manual"));
             let w = ui.available_width() - 4.0;
             let changed = if slot == 0 {
                 let r = text_field(ui, pal, &mut self.hotkey_buf, w, "Ctrl+F1");
@@ -1671,56 +2115,19 @@ impl AcajaApp {
             }
         }
 
-        card(ui, pal, Some(t(lang, "custom_image")), |ui| {
-            ui.horizontal(|ui| {
-                field_label(ui, pal, t(lang, "image_path"), LABEL_W);
-                let text = if self.preset.image.path.is_empty() {
-                    t(lang, "image_none").to_string()
-                } else {
-                    file_name(&self.preset.image.path)
-                };
-                let w = (ui.available_width() - 190.0).max(90.0);
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::hover());
+        // ---- 10 自定义图片：左 46% 缩略图井 / 右 54% 路径 + 缩放 ----
+        card(ui, pal, "image", "", self.enter_k(0), Some(t(lang, "custom_image")), |ui, pal| {
+            row2(ui, 0.46, |lu, ru| {
+                // 左列：缩略图井（居中，带玻璃厚度）
+                let (slot, _) = lu.allocate_exact_size(Vec2::new(lu.available_width(), 122.0), Sense::hover());
+                let well = Rect::from_center_size(slot.center(), Vec2::new(150.0, 118.0));
                 let mut shapes = Vec::new();
-                push_well(&mut shapes, rect, 8.0, pal);
-                ui.painter().add(Shape::Vec(shapes));
-                ui.painter().text(
-                    Pos2::new(rect.left() + 9.0, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    ellipsize(&text, 34),
-                    FontId::proportional(11.5),
-                    if self.preset.image.path.is_empty() { pal.dim } else { pal.text },
-                );
-                let tip = if self.preset.image.path.is_empty() {
-                    String::new()
-                } else {
-                    self.preset.image.path.clone()
-                };
-                if !tip.is_empty() {
-                    resp.on_hover_text(tip);
-                }
-                if button_sized(ui, pal, "img_pick", t(lang, "image_choose"), Btn::Glass, 0.0, 26.0, 11.5).clicked() {
-                    if let Some(p) = crate::system::filedialog::pick_image() {
-                        self.preset.image.path = p.to_string_lossy().into_owned();
-                        self.dirty = true;
-                    }
-                }
-                if button_sized(ui, pal, "img_clear", t(lang, "clear"), Btn::Ghost, 0.0, 26.0, 11.5).clicked() {
-                    self.preset.image.path.clear();
-                    self.dirty = true;
-                }
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                // 缩略图井
-                let (well, _) = ui.allocate_exact_size(Vec2::new(132.0, 104.0), Sense::hover());
-                let mut shapes = Vec::new();
-                push_well(&mut shapes, well, 12.0, pal);
-                ui.painter().add(Shape::Vec(shapes));
-                let inner = well.shrink(6.0);
+                push_well(&mut shapes, well, 14.0, pal);
+                lu.painter().add(Shape::Vec(shapes));
+                let inner = well.shrink(7.0);
                 match &self.thumb {
                     Thumb::Ready(tex) => {
-                        ui.painter().image(
+                        lu.painter().image(
                             tex.id(),
                             inner,
                             Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
@@ -1728,22 +2135,58 @@ impl AcajaApp {
                         );
                     }
                     Thumb::Failed => {
-                        ui.painter().text(inner.center(), Align2::CENTER_CENTER, t(lang, "image_unreadable"), FontId::proportional(11.0), pal.danger);
+                        lu.painter().text(inner.center(), Align2::CENTER_CENTER, t(lang, "image_unreadable"), f_sans(11.0), pal.danger);
                     }
                     Thumb::Empty => {
-                        ui.painter().text(inner.center(), Align2::CENTER_CENTER, t(lang, "image_preview"), FontId::proportional(11.0), pal.dim);
+                        lu.painter().text(inner.center(), Align2::CENTER_CENTER, t(lang, "image_preview"), f_sans(11.0), pal.dim);
                     }
                 }
-                ui.vertical(|ui| {
-                    if slider_row(ui, pal, t(lang, "image_scale"), |ui, w| {
-                        slider_f32(ui, pal, "isc", &mut self.preset.image.scale, Rangef::new(0.1, 5.0), w, 2, "x")
-                    }) {
+
+                // 右列：路径 + 选择 / 清除 + 缩放
+                ru.label(RichText::new(t(lang, "image_path")).size(10.5).color(pal.dim));
+                let text = if self.preset.image.path.is_empty() {
+                    t(lang, "image_none").to_string()
+                } else {
+                    file_name(&self.preset.image.path)
+                };
+                let (rect, resp) = ru.allocate_exact_size(Vec2::new(ru.available_width(), 30.0), Sense::hover());
+                let mut shapes = Vec::new();
+                push_well(&mut shapes, rect, 9.0, pal);
+                ru.painter().add(Shape::Vec(shapes));
+                ru.painter().text(
+                    Pos2::new(rect.left() + 10.0, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    ellipsize(&text, 40),
+                    f_sans(11.5),
+                    if self.preset.image.path.is_empty() { pal.dim } else { pal.text },
+                );
+                let tip = self.preset.image.path.clone();
+                if !tip.is_empty() {
+                    resp.on_hover_text(tip);
+                }
+                ru.add_space(4.0);
+                ru.horizontal(|ui| {
+                    if button_sized(ui, pal, "img_pick", t(lang, "image_choose"), Btn::Glass, 0.0, 28.0, 11.5).clicked() {
+                        if let Some(p) = crate::system::filedialog::pick_image() {
+                            self.preset.image.path = p.to_string_lossy().into_owned();
+                            self.dirty = true;
+                        }
+                    }
+                    if button_sized(ui, pal, "img_clear", t(lang, "clear"), Btn::Ghost, 0.0, 28.0, 11.5).clicked() {
+                        self.preset.image.path.clear();
                         self.dirty = true;
                     }
-                    if self.preset.image.path.is_empty() {
-                        note(ui, pal, t(lang, "image_none"));
-                    }
                 });
+                ru.add_space(8.0);
+                if slider_row(ru, pal, t(lang, "image_scale"), |ui, w| {
+                    slider_f32(ui, pal, "isc", &mut self.preset.image.scale, Rangef::new(0.1, 5.0), w, 2, "x")
+                }) {
+                    self.dirty = true;
+                }
+                if self.preset.image.path.is_empty() {
+                    ru.add_space(2.0);
+                    note(ru, pal, t(lang, "image_none"));
+                }
             });
         });
     }
@@ -1752,7 +2195,7 @@ impl AcajaApp {
         let lang = self.lang;
         let names = { self.store.lock().preset_names() };
 
-        card(ui, pal, Some(t(lang, "presets")), |ui| {
+        card(ui, pal, "presets", "01/02", self.enter_k(0), Some(t(lang, "presets")), |ui, pal| {
             ui.horizontal(|ui| {
                 if button_sized(ui, pal, "p_save", t(lang, "save"), Btn::Glass, 0.0, 26.0, 12.0).clicked() {
                     self.save_current();
@@ -1807,22 +2250,27 @@ impl AcajaApp {
                 let active = *name == self.active_name;
                 let editing = self.rename_from.as_deref() == Some(name.as_str());
                 let confirming = self.delete_confirm.as_deref() == Some(name.as_str());
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
-                let hot = ui.ctx().animate_bool_with_time(Id::new(("prow", name)), resp.hovered(), 0.12);
-                let r = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + 1.0), Pos2::new(rect.right(), rect.bottom() - 1.0));
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
+                let hot = anim_bool(ui.ctx(), Id::new(("prow", name)), resp.hovered(), ANIM_HOVER);
+                let lift = HOVER_LIFT * hot * if active { 0.0 } else { 1.0 };
+                let r = Rect::from_min_max(
+                    Pos2::new(rect.left(), rect.top() + 1.0 - lift),
+                    Pos2::new(rect.right(), rect.bottom() - 1.0 - lift),
+                );
                 let p = ui.painter();
                 if active {
-                    p.rect_filled(r, Rounding::same(11.0), pal.accent_soft);
-                    p.rect_stroke(r, Rounding::same(11.0), Stroke::new(1.0_f32, fade(pal.accent, 0.45)));
+                    p.rect_filled(r, Rounding::same(12.0), fade(mix(pal.accent2, pal.accent, 0.75), 0.22));
+                    p.rect_stroke(r, Rounding::same(12.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.26)));
                     p.rect_filled(
                         Rect::from_min_max(Pos2::new(r.left() + 3.0, r.center().y - 9.0), Pos2::new(r.left() + 5.4, r.center().y + 9.0)),
-                        Rounding::same(1.4),
-                        pal.accent,
+                        Rounding::same(1.5),
+                        pal.accent_bright,
                     );
                 } else if hot > 0.01 {
-                    p.rect_filled(r, Rounding::same(11.0), fade(pal.control, hot * 0.8));
+                    p.rect_filled(r, Rounding::same(12.0), fade(pal.control, hot * 0.9));
+                    p.rect_stroke(r, Rounding::same(12.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.08 * hot)));
                 }
-                p.circle_filled(Pos2::new(r.left() + 19.0, r.center().y), 3.2, if active { pal.ok } else { pal.dim });
+                p.circle_filled(Pos2::new(r.left() + 19.0, r.center().y), 3.2, if active { pal.ok } else { fade(pal.dim, 0.9) });
                 // 名称裁到自己的列内：窗口缩到最小宽度也不会压到右侧按钮
                 let name_rect = Rect::from_min_max(
                     Pos2::new(r.left() + 31.0, r.top()),
@@ -1833,8 +2281,8 @@ impl AcajaApp {
                     Pos2::new(r.left() + 31.0, r.center().y),
                     Align2::LEFT_CENTER,
                     ellipsize(name, 24),
-                    FontId::proportional(12.5),
-                    if active { pal.text } else { pal.label },
+                    if active { f_bold(12.5) } else { f_sans(12.5) },
+                    if active { pal.text } else { mix(pal.label, pal.text, hot) },
                 );
                 if resp.clicked() && !active && !editing && !confirming {
                     self.apply_preset(name);
@@ -1992,34 +2440,39 @@ impl AcajaApp {
             }
         });
 
-        // ---- 游戏绑定：前台进程 → 自动套用预设 ----
-        card(ui, pal, Some(t(lang, "bindings")), |ui| {
+        // ---- 12 游戏绑定：左 60% 已有绑定 / 右 40% 添加表单（表单纵向排布，窄栏不挤）----
+        card(ui, pal, "bindings", "02/02", self.enter_k(1), Some(t(lang, "bindings")), |ui, pal| {
             let bindings: Vec<(String, String)> = {
                 let store = self.store.lock();
                 store.app.game_bindings.iter().map(|b| (b.exe.clone(), b.preset.clone())).collect()
             };
-            if bindings.is_empty() {
-                ui.label(RichText::new(t(lang, "binding_none")).size(11.0).color(pal.dim));
-            }
             let mut remove: Option<usize> = None;
-            for (i, (exe, preset)) in bindings.iter().enumerate() {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
-                ui.painter().rect_filled(rect, Rounding::same(9.0), fade(pal.control, 0.55));
-                ui.painter().rect_stroke(rect, Rounding::same(9.0), Stroke::new(1.0_f32, pal.border));
-                ui.painter().text(Pos2::new(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, exe, FontId::proportional(11.5), pal.text);
-                ui.painter().text(Pos2::new(rect.right() - 84.0, rect.center().y), Align2::RIGHT_CENTER, preset, FontId::proportional(11.5), pal.accent_bright);
-                let brect = Rect::from_min_max(Pos2::new(rect.right() - 76.0, rect.top() + 3.0), Pos2::new(rect.right() - 6.0, rect.bottom() - 3.0));
-                let mut bui = ui.new_child(UiBuilder::new().max_rect(brect).layout(Layout::right_to_left(Align::Center)));
-                if button_sized(&mut bui, pal, &format!("b_rm{i}"), t(lang, "binding_remove"), Btn::Ghost, 0.0, 22.0, 11.0).clicked() {
-                    remove = Some(i);
+            row2(ui, 0.60, |lu, ru| {
+                // 左列：已有绑定
+                if bindings.is_empty() {
+                    lu.label(RichText::new(t(lang, "binding_none")).size(11.0).color(pal.dim));
                 }
-            }
-            ui.horizontal(|ui| {
-                let w = (ui.available_width() - 320.0).max(110.0);
-                ui.add(TextEdit::singleline(&mut self.new_binding_exe).hint_text(t(lang, "binding_exe")).desired_width(w));
+                for (i, (exe, preset)) in bindings.iter().enumerate() {
+                    let (rect, _) = lu.allocate_exact_size(Vec2::new(lu.available_width(), 30.0), Sense::hover());
+                    lu.painter().rect_filled(rect, Rounding::same(10.0), fade(pal.control, 0.55));
+                    lu.painter().rect_stroke(rect, Rounding::same(10.0), Stroke::new(1.0_f32, pal.border));
+                    lu.painter().text(Pos2::new(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, exe, f_sans(11.5), pal.text);
+                    lu.painter().text(Pos2::new(rect.right() - 84.0, rect.center().y), Align2::RIGHT_CENTER, preset, f_bold(11.5), pal.accent_bright);
+                    let brect = Rect::from_min_max(Pos2::new(rect.right() - 76.0, rect.top() + 3.0), Pos2::new(rect.right() - 6.0, rect.bottom() - 3.0));
+                    let mut bui = lu.new_child(UiBuilder::new().max_rect(brect).layout(Layout::right_to_left(Align::Center)));
+                    if button_sized(&mut bui, pal, &format!("b_rm{i}"), t(lang, "binding_remove"), Btn::Ghost, 0.0, 22.0, 11.0).clicked() {
+                        remove = Some(i);
+                    }
+                }
+
+                // 右列：添加表单（输入框 / 预设下拉 / 按钮纵向排布）
+                let tw = ru.available_width() - 2.0;
+                text_field(ru, pal, &mut self.new_binding_exe, tw, t(lang, "binding_exe"));
+                ru.add_space(6.0);
                 let names = { self.store.lock().preset_names() };
                 let mut picked: Option<String> = None;
-                combo(ui, 130.0, "bind_preset_glass", self.new_binding_preset.clone(), |ui| {
+                let pw = ru.available_width() - 2.0;
+                combo(ru, pw, "bind_preset_glass", self.new_binding_preset.clone(), |ui| {
                     for n in &names {
                         if ui.selectable_label(&self.new_binding_preset == n, n.clone()).clicked() {
                             picked = Some(n.clone());
@@ -2029,7 +2482,8 @@ impl AcajaApp {
                 if let Some(n) = picked {
                     self.new_binding_preset = n;
                 }
-                if button_sized(ui, pal, "b_add", t(lang, "binding_add"), Btn::Glass, 0.0, 26.0, 12.0).clicked() {
+                ru.add_space(6.0);
+                if button_sized(ru, pal, "b_add", t(lang, "binding_add"), Btn::Glass, 0.0, 28.0, 12.0).clicked() {
                     let exe = self.new_binding_exe.trim().to_ascii_lowercase();
                     if !exe.is_empty() {
                         let preset = if self.new_binding_preset.is_empty() {
@@ -2051,6 +2505,8 @@ impl AcajaApp {
                         });
                     }
                 }
+                ru.add_space(10.0);
+                note(ru, pal, t(lang, "binding_note"));
             });
             if let Some(i) = remove {
                 let saved = {
@@ -2064,46 +2520,50 @@ impl AcajaApp {
                     self.flash(t(lang, "binding_removed").to_string());
                 }
             }
-            note(ui, pal, t(lang, "binding_note"));
         });
     }
 
     /// 系统：应用级开关（开机自启）
     fn section_system(&mut self, ui: &mut Ui, pal: &Palette) {
         let lang = self.lang;
-        card(ui, pal, Some(t(lang, "system")), |ui| {
-            let mut autostart = { self.store.lock().app.autostart };
-            if checkbox(ui, pal, "autostart", &mut autostart, t(lang, "autostart")) {
-                // 注册表必须指向**主程序**（acaja.exe）的真实路径：路径从主进程
-                // 窗口反查得到，所以程序被改名/移动也不会写错目标。
-                // 主程序未运行时无法确定路径 → 不写注册表。
-                let target = crate::ipc::find_backend().and_then(crate::system::foreground::window_process_path);
-                let applied = match &target {
-                    Some(path) => match crate::system::autostart::set_autostart(autostart, std::path::Path::new(path)) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            warn!("开机自启写入注册表失败: {e}");
+        // ---- 13 系统：左 60% 开机自启 / 右 40% 说明 ----
+        card(ui, pal, "system", "", self.enter_k(0), Some(t(lang, "system")), |ui, pal| {
+            row2(ui, 0.60, |lu, ru| {
+                let mut autostart = { self.store.lock().app.autostart };
+                if checkbox(lu, pal, "autostart", &mut autostart, t(lang, "autostart")) {
+                    // 注册表必须指向**主程序**（acaja.exe）的真实路径：路径从主进程
+                    // 窗口反查得到，所以程序被改名/移动也不会写错目标。
+                    // 主程序未运行时无法确定路径 → 不写注册表。
+                    let target = crate::ipc::find_backend().and_then(crate::system::foreground::window_process_path);
+                    let applied = match &target {
+                        Some(path) => match crate::system::autostart::set_autostart(autostart, std::path::Path::new(path)) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                warn!("开机自启写入注册表失败: {e}");
+                                false
+                            }
+                        },
+                        None => {
+                            warn!("未找到主程序窗口，无法确定自启路径");
                             false
                         }
-                    },
-                    None => {
-                        warn!("未找到主程序窗口，无法确定自启路径");
-                        false
+                    };
+                    {
+                        // 失败则回滚开关，避免「界面显示已开启、注册表里其实没有」
+                        let mut store = self.store.lock();
+                        store.app.autostart = if applied { autostart } else { !autostart };
+                        let _ = store.save_app();
                     }
-                };
-                {
-                    // 失败则回滚开关，避免「界面显示已开启、注册表里其实没有」
-                    let mut store = self.store.lock();
-                    store.app.autostart = if applied { autostart } else { !autostart };
-                    let _ = store.save_app();
+                    self.flash(if applied {
+                        t(lang, "saved").to_string()
+                    } else {
+                        t(lang, "autostart_failed").to_string()
+                    });
                 }
-                self.flash(if applied {
-                    t(lang, "saved").to_string()
-                } else {
-                    t(lang, "autostart_failed").to_string()
-                });
-            }
-            note(ui, pal, t(lang, "autostart_note"));
+
+                ru.add_space(4.0);
+                note(ru, pal, t(lang, "autostart_note"));
+            });
         });
     }
 
@@ -2165,37 +2625,87 @@ impl AcajaApp {
     }
 }
 
-/// 滑杆行：标签列（104px）+ 占满剩余宽度的滑杆
+/// 滑杆行：标签列（自适应宽）+ 占满剩余宽度的滑杆
 fn slider_row(ui: &mut Ui, pal: &Palette, label: &str, body: impl FnOnce(&mut Ui, f32) -> bool) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        field_label(ui, pal, label, LABEL_W);
+        field_label(ui, pal, label);
         changed = body(ui, ui.available_width() - 4.0);
     });
     changed
 }
 
-/// 显示器行：玻璃行 + 选中态 + 分辨率说明
+/// 坐标行：标签 + DragValue（窄栏里每项独占一行也放得下）
+fn coord_row(ui: &mut Ui, pal: &Palette, label: &str, v: &mut i32) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        field_label(ui, pal, label);
+        ui.scope(|ui| {
+            apply_style(ui, pal);
+            let w = ui.available_width() - 2.0;
+            if ui.add_sized(Vec2::new(w.max(60.0), 26.0), egui::DragValue::new(v).speed(2.0)).changed() {
+                changed = true;
+            }
+        });
+    });
+    changed
+}
+
+/// 手柄图形（纯几何：机身 + 双摇杆 + 肩键），只用来看，不带交互
+fn gamepad_glyph(p: &egui::Painter, c: Pos2, pal: &Palette) {
+    let body = Rect::from_center_size(c, Vec2::new(96.0, 48.0));
+    let line = Stroke::new(1.3_f32, fade(pal.label, 0.85));
+    let soft = Stroke::new(1.3_f32, fade(pal.dim, 0.7));
+    p.rect_filled(body.expand(6.0), Rounding::same(20.0), fade(pal.accent, 0.06));
+    p.rect_stroke(body, Rounding::same(16.0), line);
+    // 肩键
+    p.line_segment([body.left_top() + Vec2::new(8.0, -6.0), body.left_top() + Vec2::new(30.0, -6.0)], soft);
+    p.line_segment([body.right_top() + Vec2::new(-30.0, -6.0), body.right_top() + Vec2::new(-8.0, -6.0)], soft);
+    // 双摇杆
+    let dl = Pos2::new(body.left() + 26.0, body.center().y);
+    p.circle_stroke(dl, 8.0, line);
+    p.circle_filled(dl, 3.0, fade(pal.accent_bright, 0.9));
+    let dr = Pos2::new(body.right() - 26.0, body.center().y);
+    p.circle_stroke(dr, 8.0, line);
+    p.circle_filled(dr, 3.0, fade(pal.accent_bright, 0.9));
+    // 中央装饰线
+    p.line_segment(
+        [Pos2::new(body.center().x - 10.0, body.center().y), Pos2::new(body.center().x + 10.0, body.center().y)],
+        Stroke::new(1.0_f32, fade(pal.border, 0.9)),
+    );
+}
+
+/// 显示器行：玻璃行 + 选中态（克莱因蓝→紫）+ 主屏标记
 fn monitor_row(ui: &mut Ui, pal: &Palette, selected: bool, label: &str, mon: Option<&MonitorInfo>) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
-    let hot = ui.ctx().animate_bool_with_time(Id::new(("mon", label)), resp.hovered(), 0.12);
-    let sel = ui.ctx().animate_value_with_time(Id::new(("monsel", label)), if selected { 1.0 } else { 0.0 }, 0.16);
-    let r = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + 1.0), Pos2::new(rect.right(), rect.bottom() - 1.0));
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+    let hot = anim_bool(ui.ctx(), Id::new(("mon", label)), resp.hovered(), ANIM_HOVER);
+    let sel = ui.ctx().animate_value_with_time(Id::new(("monsel", label)), if selected { 1.0 } else { 0.0 }, ANIM_VALUE);
+    let lift = HOVER_LIFT * hot * (1.0 - sel);
+    let r = Rect::from_min_max(
+        Pos2::new(rect.left(), rect.top() + 1.0 - lift),
+        Pos2::new(rect.right(), rect.bottom() - 1.0 - lift),
+    );
     let p = ui.painter();
-    p.rect_filled(r, Rounding::same(10.0), pal.control);
+    p.rect_filled(r, Rounding::same(11.0), fade(pal.control, 0.85));
     if sel > 0.01 {
-        p.rect_filled(r, Rounding::same(10.0), fade(pal.accent_soft, sel * 1.2));
-        p.rect_stroke(r, Rounding::same(10.0), Stroke::new(1.0_f32, fade(pal.accent, 0.5 * sel)));
+        p.rect_filled(r, Rounding::same(11.0), fade(mix(pal.accent2, pal.accent, 0.8), 0.20 * sel));
+        p.rect_stroke(r, Rounding::same(11.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.28 * sel)));
     } else if hot > 0.01 {
-        p.rect_filled(r, Rounding::same(10.0), fade(pal.control, hot));
+        p.rect_filled(r, Rounding::same(11.0), fade(pal.control, hot));
     }
     // 单选圆
     let c = Pos2::new(r.left() + 18.0, r.center().y);
-    p.circle_stroke(c, 6.4, Stroke::new(1.4_f32, mix(pal.dim, pal.accent, sel.max(hot * 0.5))));
+    p.circle_stroke(c, 6.6, Stroke::new(1.4_f32, mix(pal.dim, pal.accent_bright, sel.max(hot * 0.5))));
     if sel > 0.01 {
-        p.circle_filled(c, 3.4 * sel, fade(pal.accent, sel));
+        p.circle_filled(c, 3.4 * sel, fade(pal.accent_bright, sel));
     }
-    p.text(Pos2::new(r.left() + 34.0, r.center().y), Align2::LEFT_CENTER, ellipsize(label, 42), FontId::proportional(12.0), if selected { pal.text } else { pal.label });
+    p.text(
+        Pos2::new(r.left() + 34.0, r.center().y),
+        Align2::LEFT_CENTER,
+        ellipsize(label, 40),
+        f_sans(12.0),
+        mix(pal.label, pal.text, sel.max(hot)),
+    );
     if let Some(m) = mon {
         if m.primary {
             p.circle_filled(Pos2::new(r.right() - 14.0, r.center().y), 3.0, pal.warm);
@@ -2209,40 +2719,48 @@ fn monitor_row(ui: &mut Ui, pal: &Palette, selected: bool, label: &str, mon: Opt
 
 /// 热键录制框（点击进入录制态；录制中显示脉冲红点）
 fn key_box(ui: &mut Ui, pal: &Palette, slot: usize, text: &str, width: f32, recording: bool, hint: bool) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click());
-    let hot = ui.ctx().animate_bool_with_time(Id::new(("kbox", slot)), resp.hovered(), 0.12);
-    let rec = ui.ctx().animate_bool_with_time(Id::new(("krec", slot)), recording, 0.15);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
+    let hot = anim_bool(ui.ctx(), Id::new(("kbox", slot)), resp.hovered(), ANIM_HOVER);
+    let rec = anim_bool(ui.ctx(), Id::new(("krec", slot)), recording, ANIM_VALUE);
     let mut shapes = Vec::new();
-    push_well(&mut shapes, rect, 8.0, pal);
+    push_well(&mut shapes, rect, 9.0, pal);
+    // 录制中：危险色描边（平滑淡入）+ 外圈光晕；否则 hover 泛紫
     if rec > 0.01 {
-        shapes.push(Shape::rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0_f32, fade(pal.danger, 0.75 * rec))));
-        if recording {
-            ui.ctx().request_repaint();
-        }
+        shapes.push(Shape::rect_stroke(rect, Rounding::same(9.0), Stroke::new(1.2_f32, fade(pal.danger, 0.8 * rec))));
+        shapes.push(Shape::rect_filled(rect.expand(3.0), Rounding::same(12.0), fade(pal.danger, 0.06 * rec)));
     } else {
-        shapes.push(Shape::rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, hot * 0.7))));
+        shapes.push(Shape::rect_stroke(
+            rect,
+            Rounding::same(9.0),
+            Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, hot * 0.75)),
+        ));
+        if hot > 0.01 {
+            shapes.push(Shape::rect_filled(rect.expand(3.0), Rounding::same(12.0), fade(pal.accent, 0.05 * hot)));
+        }
     }
     ui.painter().add(Shape::Vec(shapes));
     if recording {
+        // 录制脉冲必须每帧重绘（唯一的常驻动画，且只在录制时）
         let t = ui.input(|i| i.time) as f32;
         let pulse = 0.45 + 0.55 * (t * 4.0).sin().abs();
-        let c = Pos2::new(rect.left() + 14.0, rect.center().y);
-        ui.painter().circle_filled(c, 5.0, fade(pal.danger, 0.22 * pulse));
+        let c = Pos2::new(rect.left() + 15.0, rect.center().y);
+        ui.painter().circle_filled(c, 5.4, fade(pal.danger, 0.22 * pulse));
         ui.painter().circle_filled(c, 3.2, fade(pal.danger, 0.55 + 0.45 * pulse));
         ui.painter().text(
             Pos2::new(c.x + 12.0, rect.center().y),
             Align2::LEFT_CENTER,
             text,
-            FontId::proportional(11.5),
+            f_sans(11.5),
             pal.warn,
         );
+        ui.ctx().request_repaint();
     } else {
         ui.painter().text(
-            Pos2::new(rect.left() + 11.0, rect.center().y),
+            Pos2::new(rect.left() + 12.0, rect.center().y),
             Align2::LEFT_CENTER,
             text,
-            FontId::proportional(12.0),
-            if hint { pal.dim } else { pal.text },
+            f_sans(12.0),
+            if hint { fade(pal.dim, 0.95) } else { mix(pal.text, pal.accent_bright, 0.2) },
         );
     }
     if resp.hovered() {
@@ -2255,16 +2773,16 @@ fn key_box(ui: &mut Ui, pal: &Palette, slot: usize, text: &str, width: f32, reco
 fn color_row_ui(ui: &mut Ui, pal: &Palette, label: &str, buf: &mut String, target: &mut String) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
-        field_label(ui, pal, label, LABEL_W);
+        field_label(ui, pal, label);
         let (r, g, b) = crate::overlay::parse_hex(target);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(24.0, 24.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(26.0, 26.0), Sense::hover());
         let mut shapes = Vec::new();
-        push_well(&mut shapes, rect, 7.0, pal);
+        push_well(&mut shapes, rect, 8.0, pal);
         ui.painter().add(Shape::Vec(shapes));
         let inner = rect.shrink(3.0);
-        ui.painter().rect_filled(inner, Rounding::same(5.0), Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8));
-        ui.painter().rect_stroke(inner, Rounding::same(5.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.5)));
-        let w = (ui.available_width() - 4.0).min(150.0);
+        ui.painter().rect_filled(inner, Rounding::same(6.0), Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8));
+        ui.painter().rect_stroke(inner, Rounding::same(6.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.6)));
+        let w = (ui.available_width() - 4.0).clamp(56.0, 150.0);
         if text_field(ui, pal, buf, w, "#RRGGBB").changed() {
             let s = buf.trim().trim_start_matches('#');
             if s.len() == 6 && u32::from_str_radix(s, 16).is_ok() {
@@ -2288,14 +2806,20 @@ enum WinBtn {
 
 fn win_button(ui: &mut Ui, pal: &Palette, seed: &str, kind: WinBtn) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-    let hot = ui.ctx().animate_bool_with_time(Id::new(("win", seed)), resp.hovered(), 0.12);
+    let hot = anim_bool(ui.ctx(), Id::new(("win", seed)), resp.hovered(), ANIM_HOVER);
     let danger = matches!(kind, WinBtn::Close);
+    let r = rect.translate(Vec2::new(0.0, -1.2 * hot));
     let bg = if danger { mix(pal.control, pal.danger, hot) } else { mix(pal.control, pal.hover, hot) };
     if hot > 0.01 {
-        ui.painter().rect_filled(rect, Rounding::same(8.0), fade(bg, hot));
+        ui.painter().rect_filled(r, Rounding::same(9.0), fade(bg, hot));
+        ui.painter().rect_stroke(
+            r,
+            Rounding::same(9.0),
+            Stroke::new(1.0_f32, fade(if danger { pal.danger } else { pal.accent_bright }, 0.30 * hot)),
+        );
     }
     let fg = if danger && hot > 0.5 { Color32::WHITE } else { mix(pal.label, pal.text, hot) };
-    let c = rect.center();
+    let c = r.center();
     let s = Stroke::new(1.3_f32, fg);
     match kind {
         WinBtn::Minimize => {
@@ -2621,6 +3145,8 @@ impl eframe::App for AcajaApp {
         };
         self.pal = if dark { Palette::dark() } else { Palette::light() };
         let pal = self.pal;
+        // 本帧时间：卡片入场进度的基准（只播一次，不每帧重放）
+        self.enter_now = ctx.input(|i| i.time);
         self.poll_hotkey_recording(ctx);
 
         egui::CentralPanel::default()
@@ -2630,53 +3156,74 @@ impl eframe::App for AcajaApp {
                 let full = ui.max_rect();
                 paint_backdrop(ui.painter(), full, &pal);
 
-                let title_h = 54.0;
-                let bottom_h = 58.0;
-                let title_rect = Rect::from_min_size(Pos2::new(full.left() + PAD, full.top() + 8.0), Vec2::new(full.width() - PAD * 2.0, title_h));
+                let title_h = 58.0;
+                let bottom_h = 62.0;
+                let title_rect = Rect::from_min_size(Pos2::new(full.left() + PAD, full.top() + 12.0), Vec2::new(full.width() - PAD * 2.0, title_h));
                 self.title_bar(ui, &pal, title_rect);
                 let bottom_rect = Rect::from_min_size(
-                    Pos2::new(full.left() + PAD, full.bottom() - bottom_h - 10.0),
+                    Pos2::new(full.left() + PAD, full.bottom() - bottom_h - 16.0),
                     Vec2::new(full.width() - PAD * 2.0, bottom_h),
                 );
 
-                let body_top = title_rect.bottom() + 6.0;
-                let body_bottom = bottom_rect.top() - 8.0;
-                let nav_rect = Rect::from_min_size(Pos2::new(full.left() + PAD, body_top), Vec2::new(NAV_W, body_bottom - body_top));
+                let body_top = title_rect.bottom() + 16.0;
+                let body_bottom = bottom_rect.top() - 16.0;
+                let body_h = (body_bottom - body_top).max(120.0);
+                let nav_rect = Rect::from_min_size(Pos2::new(full.left() + PAD, body_top), Vec2::new(NAV_W, body_h));
                 let content_rect = Rect::from_min_size(
-                    Pos2::new(nav_rect.right() + 16.0, body_top),
-                    Vec2::new(full.right() - PAD - 16.0 - nav_rect.right(), body_bottom - body_top),
+                    Pos2::new(nav_rect.right() + NAV_GAP, body_top),
+                    Vec2::new(full.right() - PAD - NAV_GAP - nav_rect.right(), body_h),
                 );
 
-                // ---- 导航（玻璃面板） ----
+                // ---- 导航（玻璃轨） ----
                 let mut nav_shapes = Vec::new();
                 push_panel(&mut nav_shapes, nav_rect, R_CARD, &pal, 0.0);
                 ui.painter().add(Shape::Vec(nav_shapes));
                 let mut nav_ui = ui.new_child(
                     UiBuilder::new()
-                        .max_rect(nav_rect.shrink2(Vec2::new(8.0, 10.0)))
+                        .max_rect(nav_rect.shrink2(Vec2::new(10.0, 14.0)))
                         .layout(Layout::top_down(Align::Min)),
                 );
-                nav_ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
+                nav_ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
                 self.nav_ui(&mut nav_ui, &pal);
 
-                // ---- 内容（滚动） ----
+                // ---- 区块序号水印（衬线大字，极低透明度）：大留白里的视觉锚点 ----
+                let wm = format!("{:02}", self.active_section + 1);
+                ui.painter().text(
+                    Pos2::new(content_rect.right() - 4.0, content_rect.top() - 34.0),
+                    Align2::RIGHT_TOP,
+                    wm,
+                    f_serif(150.0),
+                    fade(pal.text, if pal.dark { 0.055 } else { 0.07 }),
+                );
+
+                // ---- 内容（滚动；左右各留 14px、顶部 16px 给外阴影与入场上移） ----
                 let mut content_ui = ui.new_child(
                     UiBuilder::new().max_rect(content_rect).layout(Layout::top_down(Align::Min)),
                 );
                 content_ui.set_clip_rect(content_rect);
+                content_ui.spacing_mut().item_spacing = Vec2::new(0.0, GROUP_GAP);
                 ScrollArea::vertical().auto_shrink([false, false]).show(&mut content_ui, |ui| {
                     apply_style(ui, &pal);
+                    let ar = ui.available_rect_before_wrap();
+                    let inner = Rect::from_min_max(
+                        Pos2::new(ar.left() + 14.0, ar.top() + 16.0),
+                        Pos2::new(ar.right() - 14.0, ar.bottom()),
+                    );
+                    let mut sui = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
+                    sui.spacing_mut().item_spacing = Vec2::new(0.0, GROUP_GAP);
                     match self.active_section {
-                        SEC_STYLE => self.section_style(ui, &pal),
-                        SEC_DYNAMIC => self.section_dynamic(ui, &pal),
-                        SEC_POSITION => self.section_position(ui, &pal),
-                        SEC_GAMEPAD => self.section_gamepad(ui, &pal),
-                        SEC_HOTKEY => self.section_hotkey(ui, &pal),
-                        SEC_IMAGE => self.section_image(ui, &pal),
-                        SEC_PRESETS => self.section_presets(ui, &pal),
-                        _ => self.section_system(ui, &pal),
+                        SEC_STYLE => self.section_style(&mut sui, &pal),
+                        SEC_DYNAMIC => self.section_dynamic(&mut sui, &pal),
+                        SEC_POSITION => self.section_position(&mut sui, &pal),
+                        SEC_GAMEPAD => self.section_gamepad(&mut sui, &pal),
+                        SEC_HOTKEY => self.section_hotkey(&mut sui, &pal),
+                        SEC_IMAGE => self.section_image(&mut sui, &pal),
+                        SEC_PRESETS => self.section_presets(&mut sui, &pal),
+                        _ => self.section_system(&mut sui, &pal),
                     }
-                    ui.add_space(4.0);
+                    sui.add_space(28.0);
+                    // 把内缩子 Ui 的实际高度交回给滚动区，否则内容会被当成 0 高
+                    ui.advance_cursor_after_rect(sui.min_rect());
                 });
 
                 // ---- 底部操作条 ----
@@ -2685,6 +3232,11 @@ impl eframe::App for AcajaApp {
                 // ---- 无边框窗口的自绘缩放边 ----
                 resize_grips(ui, full);
             });
+
+        // ---- 入场动画进行中才请求重绘（静止时完全不动，省电） ----
+        if self.enter_now - self.enter_t0 < (ENTER_DUR + ENTER_STAGGER * 4.0) as f64 {
+            ctx.request_repaint();
+        }
 
         // ---- 帧末：改动即时推给主程序（真实准星跟随；写盘仍由「应用」/关窗负责） ----
         if self.dirty {

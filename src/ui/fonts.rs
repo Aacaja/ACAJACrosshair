@@ -1,15 +1,35 @@
-//! 中文字体加载：从系统字体目录加载，**插入 egui 前用 ab_glyph 实际验证**。
+//! 内置字体：无衬线常规 / 无衬线粗体 / 衬线标题（三族搭配 = 现代衬线×非衬线，粗细对比明显）。
 //!
-//! 背景（v1.0.3 修复）：v1.0.1/1.0.2 直接加载 msyh.ttc 提取的第一个字体送入 egui，
-//! 但微软雅黑与 ab_glyph 解析器存在已知兼容问题（InvalidFont panic），导致设置窗口
-//! 整体崩溃。修复策略：
-//! 1. 候选顺序优先纯 TTF（simhei.ttf / Deng.ttf），TTC 提取放后面；
-//! 2. 每个候选先用 ab_glyph（与 egui 同版本 0.2.11）解析验证，失败自动换下一个；
-//! 3. 全部失败返回 None（界面回退英文/系统字体，不再崩溃）。
+//! 为什么内置：v1.0.3 踩过坑——系统「微软雅黑」与 ab_glyph 0.2.11 不兼容，把 msyh.ttc 交给 egui
+//! 会在 epaint 内部 panic，设置窗口直接起不来。现在字体随 exe 内置
+//! （Noto Sans SC / Noto Serif SC 子集：GB2312 全汉字 + ASCII + 常用符号，共 8206 字形），
+//! 加载前一律用 ab_glyph **实测解析**，失败则逐级回退（系统 CJK 字体 → egui 自带西文字体），任何情况都不 panic。
+//!
+//! 三套字体由同一字符集、同一 `unitsPerEm = 1000` 生成 → 行内中英混排基线一致，不会「跳字」。
+//!
+//! 字体族约定（UI 侧使用，`install()` 保证这三个名字**始终存在**，缺字体时自动指向无衬线）：
+//! - [`egui::FontFamily::Proportional`] → 无衬线常规（正文）
+//! - [`FontFamily::Name("serif")`] → 衬线（标题 / 大字号）
+//! - [`FontFamily::Name("bold")`] → 无衬线粗体（数值 / 强调）
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-/// 常见中文字体候选（系统字体，仅在自带字体不可用时启用）
+use egui::FontFamily;
+
+/// 无衬线常规（正文）
+const EMBEDDED_SANS: &[u8] = include_bytes!("../../assets/fonts/ACAJASans-Regular.ttf");
+/// 无衬线粗体（数值 / 强调）
+const EMBEDDED_SANS_BOLD: &[u8] = include_bytes!("../../assets/fonts/ACAJASans-Bold.ttf");
+/// 衬线半粗（标题 / 大字）
+const EMBEDDED_SERIF: &[u8] = include_bytes!("../../assets/fonts/ACAJASerif-SemiBold.ttf");
+
+/// 衬线族名（标题）
+pub const FAMILY_SERIF: &str = "serif";
+/// 粗体族名（数值 / 强调）
+pub const FAMILY_BOLD: &str = "bold";
+
+/// 常见中文字体候选（仅在内置字体不可用时启用；均为纯 TTF 或可提取的 TTC）
 const CANDIDATES: [&str; 6] = [
     r"C:\Windows\Fonts\simhei.ttf",   // 黑体（纯 TTF）
     r"C:\Windows\Fonts\Deng.ttf",     // 等线（纯 TTF）
@@ -19,25 +39,112 @@ const CANDIDATES: [&str; 6] = [
     r"C:\Windows\Fonts\simsun.ttf",   // 宋体（部分版本为 TTF）
 ];
 
-/// 内置子集字体（GB2312 全汉字 + 常用标点 + ASCII，1.6MB）
-const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/fonts/ACAJACJK-Regular.otf");
+/// 字体安装结果：`false` = 该字体不可用、已自动回退（UI 只需记日志，不必分支）
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FontStatus {
+    pub sans: bool,
+    pub serif: bool,
+    pub bold: bool,
+}
 
-/// 加载中文字体：优先内置子集（确定性可用），其次系统字体（经 ab_glyph 验证）。
-pub fn load_cjk_font() -> Option<Vec<u8>> {
-    // 1. 内置子集：永远有效，无需系统字体
-    if ab_glyph::FontVec::try_from_vec(EMBEDDED_FONT.to_vec()).is_ok() {
-        return Some(EMBEDDED_FONT.to_vec());
+/// 把内置三套字体装进 egui。
+///
+/// **只在 `AcajaApp::new` 里调用一次**——每帧调用 `set_fonts` 会重建字形图集，界面会闪烁。
+pub fn install(ctx: &egui::Context) -> FontStatus {
+    let mut fonts = egui::FontDefinitions::default();
+    let mut status = FontStatus::default();
+
+    // 无衬线常规：内置优先；解析失败才退回系统候选
+    let sans_bytes: Option<Vec<u8>> = if parses(EMBEDDED_SANS) {
+        Some(EMBEDDED_SANS.to_vec())
+    } else {
+        log::warn!("内置无衬线字体解析失败，回退系统字体");
+        load_system_cjk()
+    };
+    if let Some(bytes) = sans_bytes {
+        fonts
+            .font_data
+            .insert("acaja-sans".to_owned(), Arc::new(egui::FontData::from_owned(bytes)));
+        status.sans = true;
     }
-    log::warn!("内置字体解析失败，回退系统字体");
-    // 2. 系统字体候选
+    if parses(EMBEDDED_SANS_BOLD) {
+        fonts.font_data.insert(
+            "acaja-bold".to_owned(),
+            Arc::new(egui::FontData::from_owned(EMBEDDED_SANS_BOLD.to_vec())),
+        );
+        status.bold = true;
+    } else {
+        log::warn!("内置粗体解析失败，粗体族将回退无衬线");
+    }
+    if parses(EMBEDDED_SERIF) {
+        fonts.font_data.insert(
+            "acaja-serif".to_owned(),
+            Arc::new(egui::FontData::from_owned(EMBEDDED_SERIF.to_vec())),
+        );
+        status.serif = true;
+    } else {
+        log::warn!("内置衬线解析失败，衬线族将回退无衬线");
+    }
+
+    // Proportional / Monospace：CJK 放最前，避免中文落到 egui 自带西文字体（缺字形 → 豆腐块）
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        if let Some(list) = fonts.families.get_mut(&family) {
+            if status.sans {
+                list.insert(0, "acaja-sans".to_owned());
+            }
+        }
+    }
+    let tail = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+
+    // 衬线 / 粗体：命名族**始终注册**（缺字体时整条链指向无衬线），UI 无需判断字体是否可用
+    let mut serif_chain: Vec<String> = Vec::new();
+    if status.serif {
+        serif_chain.push("acaja-serif".to_owned());
+    }
+    if status.sans {
+        serif_chain.push("acaja-sans".to_owned());
+    }
+    serif_chain.extend(tail.iter().cloned());
+    fonts
+        .families
+        .insert(FontFamily::Name(FAMILY_SERIF.into()), serif_chain);
+
+    let mut bold_chain: Vec<String> = Vec::new();
+    if status.bold {
+        bold_chain.push("acaja-bold".to_owned());
+    }
+    if status.sans {
+        bold_chain.push("acaja-sans".to_owned());
+    }
+    bold_chain.extend(tail);
+    fonts
+        .families
+        .insert(FontFamily::Name(FAMILY_BOLD.into()), bold_chain);
+
+    ctx.set_fonts(fonts);
+    status
+}
+
+/// ab_glyph（与 egui/epaint 同版本）实测解析：解析不了就绝不交给 egui
+fn parses(bytes: &[u8]) -> bool {
+    ab_glyph::FontVec::try_from_vec(bytes.to_vec()).is_ok()
+}
+
+/// 系统 CJK 字体回退（逐个候选实测解析，全部失败返回 None）
+fn load_system_cjk() -> Option<Vec<u8>> {
     for name in CANDIDATES {
         let path = PathBuf::from(name);
         if !path.exists() {
             continue;
         }
-        let data = std::fs::read(&path).ok()?;
-        let font = extract_first_font(&data)?;
+        let Some(data) = std::fs::read(&path).ok() else { continue };
+        let Some(font) = extract_first_font(&data) else { continue };
         if ab_glyph::FontVec::try_from_vec(font.clone()).is_ok() {
+            log::info!("使用系统字体回退：{name}");
             return Some(font);
         }
         log::info!("字体候选 {name} 解析失败，尝试下一个");
@@ -116,14 +223,54 @@ mod tests {
         assert!(extract_first_font(&fake).is_none());
     }
 
-    /// 内置字体必须可被 ab_glyph 解析（CI 回归保护）
+    /// 三套内置字体必须都能被 ab_glyph 解析（CI 回归保护）
     #[test]
-    fn embedded_font_parses() {
-        let r = ab_glyph::FontVec::try_from_vec(EMBEDDED_FONT.to_vec());
-        assert!(r.is_ok(), "内置字体解析失败: {:?}", r.err());
-        let font = r.unwrap();
-        assert!(font.glyph_id('准').0 != 0, "内置字体缺少汉字");
-        assert!(font.glyph_id('A').0 != 0, "内置字体缺少 ASCII");
+    fn embedded_fonts_parse() {
+        for (name, bytes) in [
+            ("无衬线常规", EMBEDDED_SANS),
+            ("无衬线粗体", EMBEDDED_SANS_BOLD),
+            ("衬线", EMBEDDED_SERIF),
+        ] {
+            let r = ab_glyph::FontVec::try_from_vec(bytes.to_vec());
+            assert!(r.is_ok(), "内置{name}字体解析失败: {:?}", r.err());
+        }
+    }
+
+    /// 子集必须覆盖界面真正会用到的字符（少了就会渲染成豆腐块）
+    #[test]
+    fn subsets_cover_needed_glyphs() {
+        // 字母数字 + 汉字 + 界面符号（状态圆点/对勾/箭头/度/间隔号/破折号/省略号/中文标点）
+        const NEED: &[char] = &[
+            'A', 'z', '0', '9', '准', '星', '设', '置', '形', '状', '颜', '色', '●', '○', '✓',
+            '→', '°', '·', '…', '—', '、', '。', '“', '”', '《', '》',
+        ];
+        for (name, bytes) in [
+            ("无衬线常规", EMBEDDED_SANS),
+            ("无衬线粗体", EMBEDDED_SANS_BOLD),
+            ("衬线", EMBEDDED_SERIF),
+        ] {
+            let font = ab_glyph::FontVec::try_from_vec(bytes.to_vec()).expect("解析失败");
+            let missing: Vec<char> = NEED
+                .iter()
+                .copied()
+                .filter(|c| font.glyph_id(*c).0 == 0)
+                .collect();
+            assert!(missing.is_empty(), "内置{name}字体缺字形: {missing:?}");
+        }
+    }
+
+    /// 三套字体必须同度量（同一行中英混排不能跳），否则排版会歪
+    #[test]
+    fn families_share_metrics() {
+        let heights: Vec<f32> = [EMBEDDED_SANS, EMBEDDED_SANS_BOLD, EMBEDDED_SERIF]
+            .iter()
+            .map(|b| {
+                let f = ab_glyph::FontVec::try_from_vec(b.to_vec()).expect("解析失败");
+                f.units_per_em().expect("字体缺少 unitsPerEm")
+            })
+            .collect();
+        assert_eq!(heights[0], heights[1], "无衬线常规/粗体 unitsPerEm 不一致");
+        assert_eq!(heights[0], heights[2], "衬线与无衬线 unitsPerEm 不一致");
     }
 
     /// Windows CI 诊断：系统字体尽量可解析（失败仅告警，不阻塞）

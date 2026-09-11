@@ -1,6 +1,6 @@
 # ACAJA — Crosshair Overlay for Windows
 
-> **Current version v1.2.0**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
+> **Current version v1.2.1**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
 > Maintainers: see [AGENTS.md](AGENTS.md) (architecture map, how to verify, known pitfalls) and [WORKLOG.md](WORKLOG.md) (change log).
 
 ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` + Direct2D + egui) — a complete rewrite of [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN) (Python/PySide6). Click-through, zero runtime dependencies.
@@ -12,7 +12,7 @@ ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` +
 # 📖 User Guide
 
 ## 1. Download & Run
-1. Grab `ACAJA-v1.2.0-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
+1. Grab `ACAJA-v1.2.1-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
 2. Unzip and run `acaja.exe`. You get: the **settings window** (dark UI), a **red cross** at screen center (default), and a **tray icon**.
 3. Closing the settings window keeps the app running — the crosshair stays, tray controls everything.
 
@@ -110,10 +110,14 @@ src/
 
 | Iteration | Version | Theme | Status |
 |---|---|---|---|
-| 1 | **v1.2.0** | Profile & editing workflow + Liquid Glass UI | ✅ done ([release](https://github.com/Aacaja/ACAJACrosshair/releases/tag/v1.2.0)) |
-| 2 | v1.2.1 | Dynamic crosshair & firing feedback (recoil curve / burst stacking / fire source) | ⏳ next |
-| 3 | v1.2.2 | Multi-monitor & game integration (snap rules / per-monitor profiles / process picker) | ⏳ queued |
+| 1 | **v1.2.0** | Profile & editing workflow + Liquid Glass UI | ✅ released |
+| 1.5 | **v1.2.1** | **Visual revision** (per user feedback): deep black-grey + low-saturation neon violet / Klein blue, large-whitespace asymmetric grid, stronger glassmorphism, serif × sans type pairing, silky motion | ✅ this round |
+| 2 | v1.2.2 | Dynamic crosshair & firing feedback (recoil curve / burst stacking / fire source) | ⏳ next |
+| 3 | v1.2.3 | Multi-monitor & game integration (snap rules / per-monitor profiles / process picker) | ⏳ queued |
 | 4 | v1.3.0 | Usability polish (config backup & rollback / portable mode / tray preset submenu / perf panel) | ⏳ queued |
+
+> Version note: the four **feature** iterations are unchanged; v1.2.1 is a **visual revision** inserted after
+> iteration 1 at the user's request, so iterations 2/3/4 shift to v1.2.2 / v1.2.3 / v1.3.0.
 
 ### Iteration 1 (v1.2.0) — shipped
 

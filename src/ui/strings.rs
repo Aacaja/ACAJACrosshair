@@ -49,6 +49,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("clear_hotkey", "清空热键", "Clear hotkey"),
     ("color_bottom", "下", "Bottom"),
     ("color_left", "左", "Left"),
+    ("color_outline", "颜色与描边", "Color & Outline"),
     ("color_right", "右", "Right"),
     ("color_top", "上", "Top"),
     ("confirm", "确认", "Confirm"),
