@@ -360,13 +360,20 @@ fn spawn_ui_process() {
         candidates.push(dir.join("acaja-ui.exe"));
     }
     candidates.push(PathBuf::from("acaja-ui.exe"));
+    // 主程序带 --diag 时把参数透传给设置进程：一条命令就能同时拿到两侧日志
+    // （界面毛玻璃是否生效、系统模糊调用结果都在 acaja-ui-diag.log 里）
+    let diag = std::env::args().any(|a| a == "--diag");
     for c in &candidates {
         if !Path::new(c).exists() {
             continue;
         }
-        match std::process::Command::new(c).spawn() {
+        let mut cmd = std::process::Command::new(c);
+        if diag {
+            cmd.arg("--diag");
+        }
+        match cmd.spawn() {
             Ok(_) => {
-                info!("设置进程已拉起: {}", c.display());
+                info!("设置进程已拉起: {}{}", c.display(), if diag { " (--diag)" } else { "" });
                 return;
             }
             Err(e) => warn!("设置进程拉起失败（{}）: {e}", c.display()),

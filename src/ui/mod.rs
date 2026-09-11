@@ -4,13 +4,22 @@
 //! 视觉：**全部自绘**（深黑灰底 + 低饱和霓虹紫/克莱因蓝色相光斑 + 强毛玻璃叠加 + 镜面边 + 分层阴影），
 //!       不依赖系统透明能力——系统透明不可用时界面依然是完整正确的；Win11 上再由
 //!       `windowfx::apply_once` 叠加系统圆角 / 亚克力背板（失败静默降级）。
+//! 透感（v1.3.1）：**双模式底色**——`windowfx::blur_active()` 为真时走 `Palette::translucent()`
+//!       （基底 alpha 88 ≈0.35、渐变层 ≤58，桌面透得进来），为假时保持不透明底兜底。
+//!       玻璃"有厚度"靠三件事：跟随鼠标的径向高光（整窗 430px + 每张面板）、
+//!       光斑 9px / 面板 2.6px 的**反向视差**、按光照方向（光标侧亮、背面暗）的 1.5px 边缘折射带。
 //! 排版：**三族分工**——`FontFamily::Name("serif")` 衬线（标题 / 大字 / 序号）、
 //!       `FontFamily::Name("bold")` 无衬线粗体（数值 / 关键值）、`Proportional` 正文；
 //!       字体只在 `AcajaApp::new` 里经 `fonts::install` 安装一次（每帧 set_fonts 会闪烁）。
 //! 布局：PAD 28 / 侧栏 200 / 内容与侧栏间距 24；内容区走 `row2` 的**不对称两列网格**
 //!       （按比例分栏、允许两列不等宽不等高，也允许单卡内部再左右不对称）。
-//! 动效：hover 0.18s / 数值 0.24s / 入场 0.30s（错峰 50ms），全部 ease-out，
+//! 动效（v1.3.1 重调）：全部走 egui 的**缓动**版本（`animate_bool_with_time` 是线性的，
+//!       机械感就是它来的）——hover 0.14s / 按下 0.09s / 数值 0.26s / 卡片入场 0.42s
+//!       （expo_out，错峰 45ms）/ flash 淡出 0.55s，一律 cubic_out，不做回弹；
 //!       只在动画进行中 `request_repaint()`，静止时零重绘。
+//! 性能：背板静态层（基底 + 渐变 + 网格 + 噪点）**预烘焙**成一张贴图
+//!       （尺寸/主题/透底/DPI 变化时才重算，缩放期间去抖 140ms），每帧只画 1 个矩形；
+//!       面板阴影 12 层 → 6 层（铺得更宽补回柔和度）。
 //! 行为：工作副本模式；编辑控件立即写工作副本并置脏标记；
 //!       「应用」= 保存文件 + 尽力实时推送（IPC 负载格式不变）；
 //!       「退出主程序」= 写命令文件；关闭窗口由 `on_exit` 自动保存。
@@ -66,18 +75,43 @@ const R_CARD: f32 = 18.0;
 const R_CTRL: f32 = 10.0;
 
 // ---- 动效令牌 -------------------------------------------------------------
-/// hover / 选中过渡
-const ANIM_HOVER: f32 = 0.18;
-/// 数值过渡（勾选、滑杆数值、导航选中）
-const ANIM_VALUE: f32 = 0.24;
-/// 分区切换 / 卡片入场时长
-const ENTER_DUR: f32 = 0.30;
+// 时长拆成几档（v1.2.1 复盘：一档 0.18s 打天下 → 悬停发木、选中发飘、入场发急）。
+// 曲线全部用 egui 自带缓动（`animate_bool_with_time_and_easing`）：
+// `animate_bool_with_time` 是 **线性** 的（`context.rs` 里写死了 `easing::linear`），
+// 机械感正来自那里。这里统一走 cubic_out，入场走 expo_out；**不做回弹**（工具界面回弹显廉价）。
+
+/// 悬停底色 / 描边 / 抬升
+const ANIM_HOVER: f32 = 0.14;
+/// 按下反馈（最快的一档，触点即应）
+const ANIM_PRESS: f32 = 0.09;
+/// 数值 / 勾选 / 导航选中胶囊 / 光条
+const ANIM_VALUE: f32 = 0.26;
+/// 分区切换 = 卡片入场（切分区就是重置入场时钟让整列卡片重播），
+/// 所以只有一档时长：0.42s + 每张 45ms 错峰，曲线 expo_out（前段极快、收尾极软）
+const CARD_ENTER_DUR: f32 = 0.42;
 /// 卡片错峰入场的间隔
-const ENTER_STAGGER: f32 = 0.05;
+const ENTER_STAGGER: f32 = 0.045;
 /// 入场时卡片上移的距离
 const ENTER_RISE: f32 = 14.0;
 /// hover 抬升距离
 const HOVER_LIFT: f32 = 2.0;
+/// flash 提示淡入 / 淡出时长（淡出 0.55s，比原来的一条斜线柔和）
+const FLASH_IN: f32 = 0.09;
+const FLASH_OUT: f32 = 0.55;
+
+// ---- 玻璃动效令牌 ---------------------------------------------------------
+/// 鼠标镜面高光的跟随时间常数（秒）：越小越跟手，越大越"重"
+const MOUSE_TAU: f32 = 0.07;
+/// 跟随收敛阈值（px）：低于它直接吸附到目标，动画结束（不再 request_repaint）
+const MOUSE_SETTLE: f32 = 1.2;
+/// 背板光斑的视差幅度（px，反向）：光斑动得多 → 与面板拉开前后层次
+const BLOB_PARALLAX: f32 = 9.0;
+/// 玻璃面板的视差幅度（px）：比光斑小，形成"远动多、近动少"
+const PANEL_PARALLAX: f32 = 2.6;
+/// 鼠标镜面高光半径（px）：整窗用大半径，面板内按面板尺寸收
+const GLOW_RADIUS: f32 = 430.0;
+/// 背板预烘焙的去抖时长：拖拽缩放时尺寸每帧都变，等停下再重烘焙
+const BAKE_DEBOUNCE: Duration = Duration::from_millis(140);
 
 // ---- 字体族助手（族名由 `fonts::install` 保证存在，失败时内部已回退）------
 
@@ -96,14 +130,26 @@ fn f_sans(size: f32) -> FontId {
     FontId::proportional(size)
 }
 
-/// 缓出（ease-out）：入场与 hover 都用它，起步快、收尾稳，不会"生硬"
+/// 常规缓出（hover / 数值 / 分区切换）：起步快、收尾稳
 fn ease_out(t: f32) -> f32 {
     egui::emath::easing::cubic_out(t.clamp(0.0, 1.0))
 }
 
+/// 进场缓出（卡片入场）：前段极快、后段极软，"落下"而不是"推入"
+fn ease_enter(t: f32) -> f32 {
+    egui::emath::easing::exponential_out(t.clamp(0.0, 1.0))
+}
+
+/// 0→1 的缓动过渡（bool 目标）。egui 0.30 **没有**带缓动的数值版
+/// （`animate_value_with_time` 也是线性），所以用 bool 动画 + 缓动读数。
+/// 目标为 false 时 egui 会把曲线镜像（`1 - easing(1 - v)`），来回都平滑。
+fn anim01(ctx: &Context, id: Id, target: bool, time: f32) -> f32 {
+    ctx.animate_bool_with_time_and_easing(id, target, time, egui::emath::easing::cubic_out)
+}
+
 /// 带缓出的布尔过渡；动画进行中才会请求重绘（静止时不空转）
 fn anim_bool(ctx: &Context, id: Id, target: bool, time: f32) -> f32 {
-    ctx.animate_bool_with_time_and_easing(id, target, time, egui::emath::easing::cubic_out)
+    anim01(ctx, id, target, time)
 }
 
 /// 导航 section 索引
@@ -135,15 +181,36 @@ pub(crate) const NAV_ITEMS: [(usize, &str); 8] = [
 // 调色板（深色：近黑蓝底 + 蓝紫 accent + 暖色点缀；浅色：雾白 + 同色系浅调）
 // ===========================================================================
 
+/// 玻璃动效环境：每帧由 `update` 写入。放在 `Palette` 里而不是加参数——
+/// `pal` 已经是所有绘制函数的共享上下文，几十个调用点不必再各加一个 `fx` 形参。
+#[derive(Clone, Copy)]
+struct Fx {
+    /// 平滑跟随后的鼠标位置（窗口坐标；鼠标不在窗口里时保持最后位置）
+    mouse: Pos2,
+    /// 系统模糊是否生效（`windowfx::blur_active()`）：决定底色是"真透"还是"不透明兜底"
+    blur: bool,
+}
+
+impl Default for Fx {
+    fn default() -> Self {
+        Self { mouse: Pos2::ZERO, blur: false }
+    }
+}
+
 /// 深空玻璃调色板。字段全部是 `Color32`（`from_rgba_unmultiplied` 不是 const fn，
 /// 所以用运行时构造函数而不是 const 常量），`Copy` 以便随处传值、不借 `self`。
 ///
 /// v1.3 方向：深邃黑灰底（#08080A~#101014，不用纯黑）＋ 低饱和霓虹紫 `#6C5CE7`
 /// ＋ 深紫 `#4B3FA8` ＋ 克莱因蓝 `#002FA7`；状态色整体压一档饱和，避免刺眼。
+///
+/// v1.3.1：底色分**两套**——系统模糊生效时用 [`Palette::translucent`]（真半透明，
+/// 桌面透过玻璃可见轮廓与色相），不可用时保持不透明底（界面依旧完整）。
 #[derive(Clone, Copy)]
 struct Palette {
+    /// 本帧玻璃动效环境（鼠标位置 / 系统模糊是否生效）
+    fx: Fx,
     dark: bool,
-    /// 不透明基底（系统透明不可用时的兜底）
+    /// 基底（系统透明不可用时的兜底；`fx.blur` 时是半透明的一层）
     bg_base: Color32,
     bg_top: Color32,
     bg_bottom: Color32,
@@ -191,6 +258,7 @@ impl Palette {
     /// 深色（默认）：底 #08080A~#101014/#060608；accent #6C5CE7 + 深紫 #4B3FA8 + 克莱因蓝 #002FA7
     fn dark() -> Self {
         Self {
+            fx: Fx::default(),
             dark: true,
             bg_base: rgba(8, 8, 10, 244),
             bg_top: rgba(16, 16, 20, 205),
@@ -231,6 +299,7 @@ impl Palette {
     /// 浅色：雾白 #F7F8FA~#E4E6EE，同色系浅调（克莱因蓝压深作为强调）
     fn light() -> Self {
         Self {
+            fx: Fx::default(),
             dark: false,
             bg_base: rgba(246, 247, 250, 250),
             bg_top: rgba(255, 255, 255, 205),
@@ -266,6 +335,46 @@ impl Palette {
             popup: rgba(252, 253, 255, 250),
             well: rgba(24, 30, 52, 18),
         }
+    }
+
+    /// **真透底变体**：系统模糊生效（`fx.blur`）时用这一套，桌面透过玻璃仍能看到轮廓与色相。
+    ///
+    /// 具体数值（深色）：基底 alpha **88**（≈0.35）、渐变层 **54 / 58**（≤60）、
+    /// 玻璃面 14、镜面高光 48；同时把光斑（138/150/120/72）与网格 / 噪点强度提高，
+    /// 否则叠在真实桌面上层次会被冲淡（纯色壁纸上也要"像玻璃"）。
+    /// 浅色：基底 150、渐变 118/112（雾白玻璃），光斑与描边对应加强。
+    /// 不生效时**完全不调用本函数** → 保持原来的不透明底（安全兜底）。
+    fn translucent(mut self) -> Self {
+        if self.dark {
+            self.bg_base = rgba(8, 8, 10, 88);
+            self.bg_top = rgba(16, 16, 20, 54);
+            self.bg_bottom = rgba(6, 6, 8, 58);
+            self.blob_a = rgba(108, 92, 231, 138);
+            self.blob_b = rgba(0, 47, 167, 150);
+            self.blob_c = rgba(75, 63, 168, 120);
+            self.blob_d = rgba(108, 92, 231, 72);
+            self.glass = rgba(255, 255, 255, 14);
+            self.glass_hi = rgba(255, 255, 255, 48);
+            self.border = rgba(255, 255, 255, 34);
+        } else {
+            self.bg_base = rgba(246, 247, 250, 150);
+            self.bg_top = rgba(255, 255, 255, 118);
+            self.bg_bottom = rgba(228, 230, 238, 112);
+            self.blob_a = rgba(108, 92, 231, 74);
+            self.blob_b = rgba(0, 47, 167, 58);
+            self.blob_c = rgba(75, 63, 168, 54);
+            self.blob_d = rgba(108, 92, 231, 42);
+            self.glass = rgba(255, 255, 255, 176);
+            self.glass_hi = rgba(255, 255, 255, 226);
+            self.border = rgba(24, 30, 52, 52);
+        }
+        // 内凹控件（输入框 / 滑杆槽 / 色井）在透底上要更明确，否则会"糊"进桌面
+        self.input = with_alpha(self.input, if self.dark { 148 } else { 204 });
+        self.well = with_alpha(self.well, if self.dark { 122 } else { 34 });
+        self.track = with_alpha(self.track, if self.dark { 38 } else { 46 });
+        self.control = with_alpha(self.control, 30);
+        self.shadow = with_alpha(self.shadow, if self.dark { 190 } else { 88 });
+        self
     }
 
     /// 整块调色板淡入（卡片入场用）：所有 alpha 乘以 `k`
@@ -328,6 +437,38 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     rgba(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
+// ---- 鼠标 / 视差 ----------------------------------------------------------
+
+/// 鼠标在 `rect` 内的归一化位置（各轴 -1..1；鼠标不在窗口里时用最后位置）
+fn mouse_rel(pal: &Palette, rect: Rect) -> Vec2 {
+    let c = rect.center();
+    Vec2::new(
+        ((pal.fx.mouse.x - c.x) / (rect.width() * 0.5).max(1.0)).clamp(-1.0, 1.0),
+        ((pal.fx.mouse.y - c.y) / (rect.height() * 0.5).max(1.0)).clamp(-1.0, 1.0),
+    )
+}
+
+/// 视差位移：与鼠标**反向**、幅度 `amp`（px）。
+///
+/// 背板光斑取 9px、面板取 2.6px —— 远的动得多、近的动得少，
+/// 鼠标划过时两层相对错动，"厚度"就是这么来的。
+fn parallax(pal: &Palette, rect: Rect, amp: f32) -> Vec2 {
+    let r = mouse_rel(pal, rect);
+    Vec2::new(-r.x * amp, -r.y * amp)
+}
+
+/// 直通 alpha 的 over 合成（`src` 叠在 `dst` 之上）。
+///
+/// `Color32` 存的是预乘 alpha，所以直接按预乘公式相加即可；
+/// 通道再夹到结果 alpha 以内，避免舍入让预乘不变量被破坏（epaint 会 debug_assert）。
+fn over(dst: Color32, src: Color32) -> Color32 {
+    let sa = src.a() as u32;
+    let inv = 255 - sa;
+    let a = sa + dst.a() as u32 * inv / 255;
+    let ch = |s: u8, d: u8| ((s as u32 + d as u32 * inv / 255).min(a)) as u8;
+    Color32::from_rgba_premultiplied(ch(src.r(), dst.r()), ch(src.g(), dst.g()), ch(src.b(), dst.b()), a as u8)
+}
+
 // ===========================================================================
 // 玻璃绘制原语（全部产出 Shape，便于放到「内容之下」或一次性提交）
 // ===========================================================================
@@ -336,15 +477,19 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 ///
 /// v1.3：深色主题下铺到 34px、12 层，再加一层 3px 的贴身暗部——
 /// 卡片被"托"在深空底之上，而不是贴上去。
+///
+/// v1.3.1（性能）：层数 12 → **6**、铺开范围 34 → **42px**，指数从 2.0 放宽到 1.7。
+/// 单层更宽更柔，叠出来的观感几乎不变，但每帧的描边数量减半——
+/// 阴影是每张卡、每个按钮都在画的，这一项直接决定滚动时的帧时间。
 fn push_shadow(out: &mut Vec<Shape>, rect: Rect, radius: f32, pal: &Palette, k: f32) {
-    let spread = if pal.dark { 34.0 } else { 20.0 };
-    let steps = if pal.dark { 12 } else { 8 };
+    let spread = if pal.dark { 42.0 } else { 26.0 };
+    let steps = if pal.dark { 6 } else { 5 };
     let step = spread / steps as f32;
     let y = if pal.dark { 10.0 } else { 5.0 };
     for i in 0..steps {
         let t = i as f32 / steps as f32;
         let grow = 1.0 + i as f32 * step;
-        let a = (1.0 - t).powi(2) * 0.075 * k;
+        let a = (1.0 - t).powf(1.7) * 0.10 * k;
         if a <= 0.004 {
             continue;
         }
@@ -390,10 +535,16 @@ fn push_vgrad(out: &mut Vec<Shape>, rect: Rect, radius: f32, top: Color32, botto
 }
 
 /// 玻璃面板：外阴影 → 白色玻璃底 → **紫/克莱因蓝色相流动** → 顶部光泽 → 镜面边（顶亮底暗）
+/// → 跟随鼠标的径向高光 + 随光照方向的边缘折射带。
 ///
 /// 关键取舍：玻璃底保持很低的 alpha（≈0.05），背景的光斑色相能从面板里透出来；
 /// 层次靠"叠加"而不是"加厚"——多叠几层极淡的色，而不是把面板画得更不透明。
+///
+/// v1.3.1（"玻璃要有厚度"）：面板整体做 2.6px 的反向视差（内容不动 → 前后分层），
+/// 再叠一层**被面板周长裁住**的鼠标径向高光；镜面边之外按光照方向补 1.5px 亮 / 暗带。
 fn push_panel(out: &mut Vec<Shape>, rect: Rect, radius: f32, pal: &Palette, hot: f32) {
+    // 视差：玻璃微移，内容不动 → 鼠标划过时面板与背板错开，产生厚度
+    let rect = rect.translate(parallax(pal, rect, PANEL_PARALLAX));
     push_shadow(out, rect, radius, pal, 0.9 + 0.5 * hot);
     if pal.dark {
         // 白色玻璃底：上微亮、下沉
@@ -427,15 +578,36 @@ fn push_panel(out: &mut Vec<Shape>, rect: Rect, radius: f32, pal: &Palette, hot:
         Rounding { nw: radius, ne: radius, sw: 0.0, se: 0.0 },
         fade(pal.glass_hi, if pal.dark { 0.34 + 0.18 * hot } else { 0.55 + 0.20 * hot }),
     ));
-    // 镜面边：1px 外沿（顶亮底暗）
+    // 鼠标镜面高光：中心最亮、沿半径平方衰减；外环取圆角周长 → **照不到面板外面**
+    push_radial_glow(
+        out,
+        rect,
+        radius,
+        GLOW_RADIUS,
+        pal.fx.mouse,
+        pal.glass_hi,
+        if pal.dark { 0.075 } else { 0.06 },
+    );
+    // 镜面边：1px 外沿（hover 泛紫）
     out.push(Shape::rect_stroke(
         rect,
         Rounding::same(radius),
         Stroke::new(1.0_f32, mix(pal.border, pal.accent_bright, 0.40 * hot)),
     ));
+    // 边缘折射：1px 镜面边之外再补 1.5px 的亮 / 暗带。
+    // 光照方向跟随光标（朝光的一侧亮、背光一侧暗），鼠标移动时光带在四边之间连续过渡。
     let inner = Rangef::new(rect.left() + radius * 0.75, rect.right() - radius * 0.75);
-    out.push(Shape::hline(inner, rect.top() + 1.0, Stroke::new(1.0_f32, fade(pal.glass_hi, 0.80 + 0.20 * hot))));
-    out.push(Shape::hline(inner, rect.bottom() - 0.5, Stroke::new(1.0_f32, fade(pal.glass_lo, 0.95))));
+    let vinner = Rangef::new(rect.top() + radius * 0.7, rect.bottom() - radius * 0.7);
+    let rel = mouse_rel(pal, rect);
+    let (wl, wr) = ((0.5 - 0.5 * rel.x).max(0.0), (0.5 + 0.5 * rel.x).max(0.0));
+    let (wt, wb) = ((0.5 - 0.5 * rel.y).max(0.0), (0.5 + 0.5 * rel.y).max(0.0));
+    let (bw, k) = (1.5_f32, 0.9 + 0.1 * hot);
+    let hi = |w: f32| fade(pal.glass_hi, (0.22 + 0.68 * w) * k);
+    let lo = |w: f32| fade(pal.glass_lo, 0.25 + 0.65 * w);
+    out.push(Shape::hline(inner, rect.top() + 1.5, Stroke::new(bw, hi(wt))));
+    out.push(Shape::hline(inner, rect.bottom() - 1.5, Stroke::new(bw, lo(wb))));
+    out.push(Shape::vline(rect.left() + 1.5, vinner, Stroke::new(bw, hi(wl * 0.8))));
+    out.push(Shape::vline(rect.right() - 1.5, vinner, Stroke::new(bw, lo(wr * 0.9))));
 }
 
 /// 内凹玻璃（输入框 / 下滑槽 / 缩略图井）：顶内阴影 + 底玻璃厚度
@@ -456,46 +628,45 @@ fn push_well(out: &mut Vec<Shape>, rect: Rect, radius: f32, pal: &Palette) {
     out.push(Shape::rect_stroke(rect, Rounding::same(radius), Stroke::new(1.0_f32, fade(pal.border, 0.9))));
 }
 
-/// 背板：不透明基底 → 深空渐变 → 大面积色相光斑 → 网格 + 噪点 → 玻璃窗镜面边
-fn paint_backdrop(p: &egui::Painter, rect: Rect, pal: &Palette) {
-    p.rect_filled(rect, Rounding::same(R_WINDOW), pal.bg_base);
-    let mut shapes = Vec::new();
-    push_vgrad(&mut shapes, rect, R_WINDOW, pal.bg_top, pal.bg_bottom, 30);
-    p.add(Shape::Vec(shapes));
+/// 背板：预烘焙贴图（基底 + 渐变 + 网格 + 噪点）→ 跟随鼠标的色相光斑（视差）
+/// → 鼠标镜面高光 → 玻璃窗镜面轮廓。
+///
+/// 静态层以前每帧要重画 ~230 个图元（30 段渐变 + 网格线 + 200 个噪点 + 14 环光斑），
+/// v1.3.1 起一次性栅格化成贴图（见 [`bake_backdrop`]）——
+/// 每帧只剩 1 张图 + 5 个光斑网格（原来 58 个圆）+ 1 个鼠标高光网格 + 1px 描边。
+fn paint_backdrop(p: &egui::Painter, rect: Rect, pal: &Palette, tex: Option<egui::TextureId>) {
+    match tex {
+        Some(id) => {
+            p.image(id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            p.rect_filled(rect, Rounding::same(R_WINDOW), pal.bg_base);
+        }
+    }
     // 大面积柔和色相光斑：霓虹紫 / 克莱因蓝 / 深紫 —— 卡片就浮在它们上面，
-    // 玻璃面板很透，所以这些色相会从每一张卡里透出来（"毛玻璃透感"的来源）
+    // 玻璃面板很透，所以这些色相会从每一张卡里透出来（"毛玻璃透感"的来源）。
+    // 光斑随鼠标做 9px 的反向视差（面板 2.6px）——两层错动，鼠标划过时就有前后层次。
     let (w, h) = (rect.width(), rect.height());
-    soft_blob(p, Pos2::new(rect.left() + w * 0.10, rect.top() + h * 0.01), w * 0.54, pal.blob_a, 14);
-    soft_blob(p, Pos2::new(rect.left() + w * 1.00, rect.top() + h * 0.24), w * 0.48, pal.blob_b, 14);
-    soft_blob(p, Pos2::new(rect.left() + w * 0.70, rect.bottom() + h * 0.05), w * 0.46, pal.blob_c, 12);
-    soft_blob(p, Pos2::new(rect.left() + w * 0.26, rect.bottom() - h * 0.03), w * 0.32, pal.blob_d, 10);
-    soft_blob(p, Pos2::new(rect.left() + w * 0.88, rect.top() + h * 0.74), w * 0.24, pal.blob_a, 8);
-    // 细网格 + 确定性噪点（同一种子 → 静态颗粒，不闪烁）
-    let grid = fade(pal.grain, if pal.dark { 0.026 } else { 0.040 });
-    let step = 36.0;
-    let mut x = rect.left() + step;
-    while x < rect.right() - 4.0 {
-        p.line_segment([Pos2::new(x, rect.top() + 2.0), Pos2::new(x, rect.bottom() - 2.0)], Stroke::new(1.0_f32, grid));
-        x += step;
-    }
-    let mut y = rect.top() + step;
-    while y < rect.bottom() - 4.0 {
-        p.line_segment([Pos2::new(rect.left() + 2.0, y), Pos2::new(rect.right() - 2.0, y)], Stroke::new(1.0_f32, grid));
-        y += step;
-    }
-    let grain = fade(pal.grain, if pal.dark { 0.030 } else { 0.045 });
-    let mut seed = 0x9E37_79B9u32;
-    for _ in 0..200 {
-        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let fx = (seed >> 9) as f32 / 8_388_608.0;
-        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let fy = (seed >> 9) as f32 / 8_388_608.0;
-        p.rect_filled(
-            Rect::from_min_size(Pos2::new(rect.left() + fx * w, rect.top() + fy * h), Vec2::splat(1.0)),
-            0.0,
-            grain,
-        );
-    }
+    let ofs = parallax(pal, rect, BLOB_PARALLAX);
+    let at = |x: f32, y: f32| Pos2::new(rect.left() + x, rect.top() + y) + ofs;
+    let mut shapes = Vec::new();
+    // 峰值 = 原「同心圆叠加」的等效累积 alpha（14 环 → 0.78α、12 环 → 0.72α、10 环 → 0.65α、8 环 → 0.58α）
+    push_blob(&mut shapes, rect, at(w * 0.10, h * 0.01), w * 0.54, pal.blob_a, 0.78);
+    push_blob(&mut shapes, rect, at(w * 1.00, h * 0.24), w * 0.48, pal.blob_b, 0.78);
+    push_blob(&mut shapes, rect, at(w * 0.70, h * 1.05), w * 0.46, pal.blob_c, 0.72);
+    push_blob(&mut shapes, rect, at(w * 0.26, h * 0.97), w * 0.32, pal.blob_d, 0.65);
+    push_blob(&mut shapes, rect, at(w * 0.88, h * 0.74), w * 0.24, pal.blob_a, 0.58);
+    // 鼠标镜面高光（整窗）：大半径 430px、极低 alpha，平滑跟随光标
+    push_radial_glow(
+        &mut shapes,
+        rect,
+        R_WINDOW,
+        GLOW_RADIUS,
+        pal.fx.mouse,
+        pal.glass_hi,
+        if pal.dark { 0.05 } else { 0.045 },
+    );
+    p.add(Shape::Vec(shapes));
     // 玻璃窗镜面轮廓 + 顶部一道更亮的高光
     p.rect_stroke(rect.shrink(0.5), Rounding::same(R_WINDOW), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.5)));
     p.line_segment(
@@ -504,13 +675,154 @@ fn paint_backdrop(p: &egui::Painter, rect: Rect, pal: &Palette) {
     );
 }
 
-/// 柔光斑：同心圆叠加出「模糊」观感（每层都很淡，越靠内叠加越多）
-fn soft_blob(p: &egui::Painter, center: Pos2, radius: f32, color: Color32, rings: usize) {
-    for i in 0..rings {
-        let t = i as f32 / rings as f32;
-        let r = radius * (1.0 - 0.62 * t);
-        p.circle_filled(center, r, fade(color, 0.05 + 0.035 * t));
+/// 圆角矩形周长的采样点（顺时针，每个圆角 `seg` 段）。
+///
+/// 用作径向高光的外环：高光被**面板形状**裁住，不会溢出去照亮面板外面的东西
+/// （egui 没有圆角裁剪，普通圆形光晕在圆角处会"漏"出去）。
+fn rounded_perimeter(rect: Rect, radius: f32, seg: usize, out: &mut Vec<Pos2>) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let r = radius.clamp(0.0, rect.width().min(rect.height()) * 0.5);
+    if r <= 0.01 {
+        out.extend([rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()]);
+        return;
     }
+    let seg = seg.max(2);
+    let corners = [
+        (Pos2::new(rect.left() + r, rect.top() + r), PI),
+        (Pos2::new(rect.right() - r, rect.top() + r), PI + FRAC_PI_2),
+        (Pos2::new(rect.right() - r, rect.bottom() - r), 0.0),
+        (Pos2::new(rect.left() + r, rect.bottom() - r), FRAC_PI_2),
+    ];
+    for (c, a0) in corners {
+        for i in 0..=seg {
+            let a = a0 + FRAC_PI_2 * (i as f32 / seg as f32);
+            out.push(c + Vec2::new(a.cos(), a.sin()) * r);
+        }
+    }
+}
+
+/// 跟随鼠标的柔和径向高光：顶点扇形，中心最亮，外环按「到光心的距离」平方衰减。
+///
+/// 外环取**圆角矩形周长**（`corner` = 该矩形的圆角半径）→ 高光被形状裁住，
+/// 既不会溢到面板外面照亮别的东西，也不会在窗口的透明圆角处漏出一块颜色
+/// （egui 没有圆角裁剪，普通圆形光晕在圆角上一定会漏）。
+///
+/// 半径取 `min(radius, 面板长边 × 0.9)`——缩略图这种小面板里也要有衰减，
+/// 否则整块一起亮就变成了"泛白"而不是高光。
+fn push_radial_glow(
+    out: &mut Vec<Shape>,
+    rect: Rect,
+    corner: f32,
+    radius: f32,
+    center: Pos2,
+    color: Color32,
+    alpha: f32,
+) {
+    if alpha <= 0.004 || rect.width() < 6.0 || rect.height() < 6.0 {
+        return;
+    }
+    let center = Pos2::new(center.x.clamp(rect.left(), rect.right()), center.y.clamp(rect.top(), rect.bottom()));
+    let r = radius.min(rect.width().max(rect.height()) * 0.9).max(24.0);
+    let mut per = Vec::with_capacity(32);
+    rounded_perimeter(rect, corner.min(rect.width().min(rect.height()) * 0.5), 5, &mut per);
+    let mut mesh = egui::epaint::Mesh::default();
+    let a8 = |f: f32| (alpha * f * 255.0).round().clamp(0.0, 255.0) as u8;
+    mesh.colored_vertex(center, with_alpha(color, a8(1.0)));
+    for p in &per {
+        let d = (*p - center).length();
+        let f = (1.0 - d / r).clamp(0.0, 1.0);
+        mesh.colored_vertex(*p, with_alpha(color, a8(f * f)));
+    }
+    let n = per.len() as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    out.push(Shape::mesh(mesh));
+}
+
+/// 色相光斑：同一个扇形网格，但落在一个**固定的峰值 alpha** 上，向边缘平方衰减。
+///
+/// v1.3.1 之前是「14 层同心圆叠加」，峰值 alpha ≈ `1 - Π(1-aᵢ) ≈ 0.62`，
+/// 换成一个网格后：形状数从 14 降到 1，且能像窗口圆角那样裁剪（同心圆做不到），
+/// 观感上更接近真正的高斯光斑（顶点插值比离散同心圆更平滑）。
+fn push_blob(out: &mut Vec<Shape>, win: Rect, center: Pos2, radius: f32, color: Color32, peak: f32) {
+    push_radial_glow(out, win, R_WINDOW, radius, center, color, peak * color.a() as f32 / 255.0);
+}
+
+/// 按系数缩放像素（预乘 alpha 的四个通道一起缩，保持预乘不变量）
+fn scale_px(c: Color32, f: f32) -> Color32 {
+    let f = f.clamp(0.0, 1.0);
+    let s = |v: u8| (v as f32 * f).round() as u8;
+    Color32::from_rgba_premultiplied(s(c.r()), s(c.g()), s(c.b()), s(c.a()))
+}
+
+/// 背板预烘焙：把「基底 + 垂直渐变 + 网格 + 噪点」这些**静态**层一次性栅格化成 RGBA 像素。
+///
+/// - 触发条件（任一变化）：窗口像素尺寸 / 主题 / **系统模糊是否生效** / DPI 缩放；
+/// - 尺寸连续变化（拖拽缩放）时按 [`BAKE_DEBOUNCE`] 去抖，期间的旧贴图被拉伸，
+///   一帧的事，看不出来；
+/// - 贴图尺寸 = 逻辑尺寸 × `pixels_per_point`（1:1 texel，颗粒与网格线不糊）；
+/// - 圆角在**烘焙时**就抹成透明 → 画一张矩形图就是窗口形状，四角不会露方角。
+fn bake_backdrop(size: [usize; 2], pal: &Palette, ppp: f32) -> egui::ColorImage {
+    let [w, h] = size;
+    let mut img = egui::ColorImage::new(size, Color32::TRANSPARENT);
+    if w == 0 || h == 0 {
+        return img;
+    }
+    // 确定性噪点瓦片（256×256）：同一种子 → 静态颗粒，绝不逐帧随机（否则会闪）
+    let mut noise = [0u8; 256 * 256];
+    let mut seed = 0x9E37_79B9u32;
+    for v in noise.iter_mut() {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *v = (seed >> 24) as u8;
+    }
+    let ppp = ppp.max(0.5);
+    let grid_step = (36.0 * ppp).max(6.0);
+    let line_w = ppp.max(1.0);
+    // 透底模式下网格 / 噪点加强（叠在真实桌面上时弱了会看不见层次）
+    let (grid_a, grain_a) = match (pal.dark, pal.fx.blur) {
+        (true, true) => (0.045_f32, 0.030_f32),
+        (true, false) => (0.026_f32, 0.018_f32),
+        (false, true) => (0.060_f32, 0.038_f32),
+        (false, false) => (0.040_f32, 0.025_f32),
+    };
+    let grid = with_alpha(pal.grain, (grid_a * 255.0).round() as u8);
+    let grain = grain_a * 255.0;
+    // 哪些列 / 行落在网格线上（预计算，免得逐像素取模）
+    let gx: Vec<bool> = (0..w).map(|x| (x as f32 % grid_step) < line_w).collect();
+    let gy: Vec<bool> = (0..h).map(|y| (y as f32 % grid_step) < line_w).collect();
+    let r = R_WINDOW * ppp;
+    let (fw, fh) = (w as f32, h as f32);
+    for y in 0..h {
+        let gy_f = (y as f32 + 0.5) / fh;
+        // 基底 + 垂直渐变：整行只算一次（这是 2M 像素里唯一"便宜"的部分）
+        let row0 = over(pal.bg_base, mix(pal.bg_top, pal.bg_bottom, gy_f));
+        let row = if gy[y] { over(row0, grid) } else { row0 };
+        let py = y as f32 + 0.5;
+        let dy = if py < r { py - r } else if py > fh - r { py - (fh - r) } else { 0.0 };
+        for x in 0..w {
+            let mut c = if gx[x] { over(row, grid) } else { row };
+            let n = noise[((y & 255) << 8) | (x & 255)];
+            if n > 8 {
+                c = over(c, with_alpha(pal.grain, (grain * n as f32 / 255.0) as u8));
+            }
+            // 圆角遮罩：四角之外完全透明（只有角落那几平方百像素会算这段）
+            if dy != 0.0 {
+                let px = x as f32 + 0.5;
+                let dx = if px < r { px - r } else if px > fw - r { px - (fw - r) } else { 0.0 };
+                if dx != 0.0 {
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d >= r {
+                        img.pixels[y * w + x] = Color32::TRANSPARENT;
+                        continue;
+                    }
+                    c = scale_px(c, r - d);
+                }
+            }
+            img.pixels[y * w + x] = c;
+        }
+    }
+    img
 }
 
 // ===========================================================================
@@ -540,6 +852,10 @@ fn apply_style(ui: &mut Ui, pal: &Palette) {
         sc.bar_inner_margin = 4.0;
         ui.style_mut().spacing.scroll = sc;
     }
+    // 滚动平滑：滚轮 / 拖拽走 egui 的 `smooth_scroll_delta`（本来就是插值的），
+    // 这里再把**程序化滚动**（点到控件自动滚到可见）从默认的 1000px/s 调慢一点，
+    // 时长区间也放宽到 0.14~0.34s —— 一格格跳的感觉来自程序化滚动这条路径。
+    ui.style_mut().scroll_animation = egui::style::ScrollAnimation::new(760.0, Rangef::new(0.14, 0.34));
     let v = ui.visuals_mut();
     v.dark_mode = pal.dark;
     v.override_text_color = Some(pal.text);
@@ -608,8 +924,11 @@ fn button_sized(
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     let id = Id::new(("btn", seed, label));
     let hot = anim_bool(ui.ctx(), id, resp.hovered(), ANIM_HOVER);
-    let down = resp.is_pointer_button_down_on();
-    let lift = HOVER_LIFT * hot - if down { 1.2 } else { 0.0 };
+    // 按下反馈：0.09s 的 quadratic 快曲线（触点即应），位移与底色同一条曲线
+    let press = ui
+        .ctx()
+        .animate_bool_with_time_and_easing(id.with("press"), resp.is_pointer_button_down_on(), ANIM_PRESS, egui::emath::easing::quadratic_out);
+    let lift = HOVER_LIFT * hot - 1.2 * press;
     let rect = rect.translate(Vec2::new(0.0, -lift));
     let radius = Rounding::same(R_CTRL);
     let fg = if pal.dark { pal.text } else { Color32::WHITE };
@@ -697,7 +1016,7 @@ fn checkbox(ui: &mut Ui, pal: &Palette, seed: &str, on: &mut bool, label: &str) 
     let text_w = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), pal.label).size().x;
     let w = (26.0 + text_w).min(ui.available_width().max(26.0));
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::click());
-    let t = ui.ctx().animate_value_with_time(Id::new(("chk", seed)), if *on { 1.0 } else { 0.0 }, ANIM_VALUE);
+    let t = anim01(ui.ctx(), Id::new(("chk", seed)), *on, ANIM_VALUE);
     let hot = anim_bool(ui.ctx(), Id::new(("chkh", seed)), resp.hovered(), ANIM_HOVER);
     let box_rect = Rect::from_center_size(Pos2::new(rect.left() + 9.0, rect.center().y), Vec2::splat(18.0));
     let p = ui.painter();
@@ -900,7 +1219,7 @@ fn card(
     title: Option<&str>,
     body: impl FnOnce(&mut Ui, &Palette),
 ) {
-    let e = ease_out(enter);
+    let e = ease_enter(enter);
     let id = Id::new(("card", seed));
     let hid = Id::new(("cardh", seed));
     let prev: Option<Rect> = ui.ctx().data(|d| d.get_temp(id));
@@ -1075,6 +1394,24 @@ pub struct AcajaApp {
     enter_t0: f64,
     /// 本帧时间（每帧取一次，卡片入场进度共用）
     enter_now: f64,
+
+    // ---- v1.3.1：真透底 + 玻璃厚度 ----
+    /// 系统模糊是否生效（每帧读 `windowfx::blur_active()`）→ 决定用真半透明底还是不透明兜底
+    blur_active: bool,
+    /// `windowfx::apply_once()` 的实际结果（`None` = 三种方式都失败）
+    blur_kind: Option<crate::system::windowfx::BlurKind>,
+    /// 还在等 `windowfx::apply_once()` 出结果 → 「系统」分区显示「检测中…」
+    blur_pending: bool,
+    /// 平滑跟随的鼠标位置（`None` = 还没收到鼠标事件，用窗口中心兜底）
+    mouse_smooth: Option<Pos2>,
+    /// 上一帧时间（鼠标跟随的时间插值用）
+    fx_t: f64,
+    /// 背板预烘焙贴图（基底 + 渐变 + 网格 + 噪点，一次性栅格化）
+    backdrop: Option<egui::TextureHandle>,
+    /// 贴图缓存键：(像素宽, 像素高, 深色, 透底)
+    backdrop_key: (usize, usize, bool, bool),
+    /// 上次烘焙时刻（拖拽缩放的连续变化按 [`BAKE_DEBOUNCE`] 去抖）
+    backdrop_baked_at: Instant,
 }
 
 /// 启动设置窗口（独立进程模式：阻塞直到窗口关闭，关闭即进程结束）
@@ -1187,6 +1524,14 @@ impl AcajaApp {
             tpl_previews,
             enter_t0: 0.0,
             enter_now: 0.0,
+            blur_active: false,
+            blur_kind: None,
+            blur_pending: true,
+            mouse_smooth: None,
+            fx_t: 0.0,
+            backdrop: None,
+            backdrop_key: (0, 0, false, false),
+            backdrop_baked_at: Instant::now(),
         };
         app.sync_buffers();
         app
@@ -1208,12 +1553,13 @@ impl AcajaApp {
 
     /// 入场淡入系数（0.10→1）：卡片内部自绘的内容（预览图等）用它一起渐显
     fn enter_alpha(&self, idx: usize) -> f32 {
-        0.10 + 0.90 * ease_out(self.enter_k(idx))
+        0.10 + 0.90 * ease_enter(self.enter_k(idx))
     }
 
-    /// 第 `idx` 张卡片的入场进度（0→1；每张错峰 50ms，缓出）
+    /// 第 `idx` 张卡片的入场进度（0→1，线性进度；曲线由调用方按 expo_out 缓动）。
+    /// 每张错峰 45ms —— 分区切换时整列卡片"依次落下"，而不是齐刷刷跳出来。
     fn enter_k(&self, idx: usize) -> f32 {
-        let t = (self.enter_now - self.enter_t0 - idx as f64 * ENTER_STAGGER as f64) / ENTER_DUR as f64;
+        let t = (self.enter_now - self.enter_t0 - idx as f64 * ENTER_STAGGER as f64) / CARD_ENTER_DUR as f64;
         t.clamp(0.0, 1.0) as f32
     }
 
@@ -1470,7 +1816,7 @@ impl AcajaApp {
             let selected = self.active_section == idx;
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
             let hot = anim_bool(ui.ctx(), Id::new(("nav_h", idx)), resp.hovered(), ANIM_HOVER);
-            let sel = ui.ctx().animate_value_with_time(Id::new(("nav_s", idx)), if selected { 1.0 } else { 0.0 }, ANIM_VALUE);
+            let sel = anim01(ui.ctx(), Id::new(("nav_s", idx)), selected, ANIM_VALUE);
             // hover 抬升与选中态共用同一条曲线：位移 / 底色 / 描边同步过渡
             let lift = HOVER_LIFT * hot * (1.0 - sel);
             let r = Rect::from_min_max(
@@ -1491,8 +1837,9 @@ impl AcajaApp {
                 p.rect_filled(r, Rounding::same(12.0), fade(pal.control, 0.85 * hot));
                 p.rect_stroke(r, Rounding::same(12.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.10 * hot)));
             }
-            let fg = if selected { pal.nav_fg_on } else { mix(pal.nav_fg, pal.nav_fg_on, hot) };
-            nav_glyph(p, idx, Pos2::new(r.left() + 24.0, r.center().y), if selected { pal.accent_bright } else { fg });
+            // 前景色 / 图标 / 序号都跟着 sel 与 hot 连续过渡（选中不再"啪"地换色）
+            let fg = mix(pal.nav_fg, pal.nav_fg_on, hot.max(sel));
+            nav_glyph(p, idx, Pos2::new(r.left() + 24.0, r.center().y), mix(fg, pal.accent_bright, sel));
             // 标签：选中项走 bold 族（粗细对比），其余常规无衬线
             let lf = if selected { f_bold(13.0) } else { f_sans(13.0) };
             p.text(Pos2::new(r.left() + 40.0, r.center().y - 0.5), Align2::LEFT_CENTER, t(lang, key), lf, fg);
@@ -1502,7 +1849,7 @@ impl AcajaApp {
                 Align2::RIGHT_CENTER,
                 format!("{:02}", idx + 1),
                 f_serif(11.0),
-                if selected { fade(pal.accent_bright, 0.95) } else { fade(pal.dim, 0.65 + 0.35 * hot) },
+                mix(fade(pal.dim, 0.65 + 0.35 * hot), fade(pal.accent_bright, 0.95), sel),
             );
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
@@ -1562,14 +1909,22 @@ impl AcajaApp {
             ui.add_space(6.0);
             if let Some((text, at)) = self.status.as_ref() {
                 let el = at.elapsed().as_secs_f32();
-                if el < STATUS_TTL.as_secs_f32() {
-                    let k = if el > 1.3 { (1.0 - (el - 1.3) / (STATUS_TTL.as_secs_f32() - 1.3)).clamp(0.0, 1.0) } else { 1.0 };
+                let ttl = STATUS_TTL.as_secs_f32();
+                if el < ttl {
+                    // 淡入 0.09s / 淡出 0.55s，都走 cubic_out——
+                    // 原来的线性斜线在末尾是"啪"地暗掉，看着很生硬
+                    let k = if el < FLASH_IN {
+                        ease_out(el / FLASH_IN)
+                    } else if el > ttl - FLASH_OUT {
+                        1.0 - ease_out((el - (ttl - FLASH_OUT)) / FLASH_OUT)
+                    } else {
+                        1.0
+                    };
                     // flash 提示走 bold 族：和正文拉开粗细层次
                     ui.label(RichText::new(text.clone()).font(f_bold(11.5)).color(with_alpha(pal.ok, (255.0 * k) as u8)));
-                    // 仅在淡出进行中请求重绘（静止时不空转）
-                    if k < 1.0 {
-                        ui.ctx().request_repaint();
-                    }
+                    // flash 存活期间持续重绘：否则淡出要等下一次鼠标事件才会开始（提示会一直亮着），
+                    // 到 TTL 也才能在**同一帧**消失。1.9s 后就停，静止时依旧不空转。
+                    ui.ctx().request_repaint();
                 } else {
                     expire = true;
                 }
@@ -2252,25 +2607,36 @@ impl AcajaApp {
                 let confirming = self.delete_confirm.as_deref() == Some(name.as_str());
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
                 let hot = anim_bool(ui.ctx(), Id::new(("prow", name)), resp.hovered(), ANIM_HOVER);
-                let lift = HOVER_LIFT * hot * if active { 0.0 } else { 1.0 };
+                // 激活态也走缓动：点「启用」时底色 / 光条 / 圆点 / 文字一起过渡，不"啪"地跳
+                let act = anim01(ui.ctx(), Id::new(("prow_a", name)), active, ANIM_VALUE);
+                let lift = HOVER_LIFT * hot * (1.0 - act);
                 let r = Rect::from_min_max(
                     Pos2::new(rect.left(), rect.top() + 1.0 - lift),
                     Pos2::new(rect.right(), rect.bottom() - 1.0 - lift),
                 );
                 let p = ui.painter();
-                if active {
-                    p.rect_filled(r, Rounding::same(12.0), fade(mix(pal.accent2, pal.accent, 0.75), 0.22));
-                    p.rect_stroke(r, Rounding::same(12.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.26)));
+                if hot > 0.01 || act > 0.01 {
                     p.rect_filled(
-                        Rect::from_min_max(Pos2::new(r.left() + 3.0, r.center().y - 9.0), Pos2::new(r.left() + 5.4, r.center().y + 9.0)),
-                        Rounding::same(1.5),
-                        pal.accent_bright,
+                        r,
+                        Rounding::same(12.0),
+                        mix(fade(pal.control, hot * 0.9), fade(mix(pal.accent2, pal.accent, 0.75), 0.22), act),
                     );
-                } else if hot > 0.01 {
-                    p.rect_filled(r, Rounding::same(12.0), fade(pal.control, hot * 0.9));
-                    p.rect_stroke(r, Rounding::same(12.0), Stroke::new(1.0_f32, fade(pal.glass_hi, 0.08 * hot)));
+                    p.rect_stroke(
+                        r,
+                        Rounding::same(12.0),
+                        Stroke::new(1.0_f32, fade(pal.glass_hi, (0.08 * hot).max(0.26 * act))),
+                    );
+                    // 左侧激活光条：高度与不透明度一起长出来
+                    p.rect_filled(
+                        Rect::from_min_max(
+                            Pos2::new(r.left() + 3.0, r.center().y - 9.0 * act),
+                            Pos2::new(r.left() + 5.4, r.center().y + 9.0 * act),
+                        ),
+                        Rounding::same(1.5),
+                        fade(pal.accent_bright, act),
+                    );
                 }
-                p.circle_filled(Pos2::new(r.left() + 19.0, r.center().y), 3.2, if active { pal.ok } else { fade(pal.dim, 0.9) });
+                p.circle_filled(Pos2::new(r.left() + 19.0, r.center().y), 3.2, mix(fade(pal.dim, 0.9), pal.ok, act));
                 // 名称裁到自己的列内：窗口缩到最小宽度也不会压到右侧按钮
                 let name_rect = Rect::from_min_max(
                     Pos2::new(r.left() + 31.0, r.top()),
@@ -2282,7 +2648,7 @@ impl AcajaApp {
                     Align2::LEFT_CENTER,
                     ellipsize(name, 24),
                     if active { f_bold(12.5) } else { f_sans(12.5) },
-                    if active { pal.text } else { mix(pal.label, pal.text, hot) },
+                    mix(mix(pal.label, pal.text, hot), pal.text, act),
                 );
                 if resp.clicked() && !active && !editing && !confirming {
                     self.apply_preset(name);
@@ -2564,6 +2930,30 @@ impl AcajaApp {
                 ru.add_space(4.0);
                 note(ru, pal, t(lang, "autostart_note"));
             });
+
+            // ---- 毛玻璃状态：用户不用翻日志就知道系统模糊有没有生效 ----
+            // 生效 → 窗口用真半透明底（桌面透得进来）；不可用 → 已自动改用不透明底兜底
+            ui.add_space(12.0);
+            let (dot, key) = if self.blur_pending {
+                (pal.warn, "glass_checking")
+            } else {
+                match self.blur_kind {
+                    Some(crate::system::windowfx::BlurKind::Acrylic) => (pal.ok, "glass_acrylic"),
+                    Some(crate::system::windowfx::BlurKind::Backdrop) => (pal.ok, "glass_backdrop"),
+                    Some(crate::system::windowfx::BlurKind::Aero) => (pal.ok, "glass_aero"),
+                    _ => (pal.danger, "glass_unavailable"),
+                }
+            };
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 3.4, dot);
+                ui.label(
+                    RichText::new(format!("{}：{}", t(lang, "glass"), t(lang, key)))
+                        .size(11.0)
+                        .color(mix(pal.label, pal.text, 0.30)),
+                );
+            });
+            note(ui, pal, t(lang, "glass_note"));
         });
     }
 
@@ -2679,7 +3069,7 @@ fn gamepad_glyph(p: &egui::Painter, c: Pos2, pal: &Palette) {
 fn monitor_row(ui: &mut Ui, pal: &Palette, selected: bool, label: &str, mon: Option<&MonitorInfo>) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
     let hot = anim_bool(ui.ctx(), Id::new(("mon", label)), resp.hovered(), ANIM_HOVER);
-    let sel = ui.ctx().animate_value_with_time(Id::new(("monsel", label)), if selected { 1.0 } else { 0.0 }, ANIM_VALUE);
+    let sel = anim01(ui.ctx(), Id::new(("monsel", label)), selected, ANIM_VALUE);
     let lift = HOVER_LIFT * hot * (1.0 - sel);
     let r = Rect::from_min_max(
         Pos2::new(rect.left(), rect.top() + 1.0 - lift),
@@ -3135,26 +3525,85 @@ impl eframe::App for AcajaApp {
     }
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // 首帧起每帧调用：窗口就绪后一次性加系统圆角 + 亚克力（失败静默降级）
-        crate::system::windowfx::apply_once("ACAJA");
+        // 首帧起每帧调用：窗口就绪后**一次性**加系统圆角 + 亚克力。
+        // 返回 `Some(kind)` = 这一帧刚完成尝试（记一条日志，之后恒为 `None`）；
+        // 成功与否另有 `blur_active()` 每帧可读，界面据此在高透 / 兜底两组底色之间切。
+        if let Some(kind) = crate::system::windowfx::apply_once() {
+            self.blur_pending = false;
+            info!("设置窗口毛玻璃状态: {kind:?}");
+            self.blur_kind = match kind {
+                crate::system::windowfx::BlurKind::None => None,
+                k => Some(k),
+            };
+        }
+        self.blur_active = crate::system::windowfx::blur_active();
         let dark = match self.theme.as_str() {
             "light" => false,
             "dark" => true,
             // 「自动」跟随系统（eframe 默认把系统主题写进 egui visuals）
             _ => ctx.style().visuals.dark_mode,
         };
-        self.pal = if dark { Palette::dark() } else { Palette::light() };
-        let pal = self.pal;
         // 本帧时间：卡片入场进度的基准（只播一次，不每帧重放）
         self.enter_now = ctx.input(|i| i.time);
+        // 2 秒还没拿到结果（极端环境下枚举不到本进程窗口）→ 不再显示「检测中…」
+        if self.blur_pending && self.enter_now > 2.0 {
+            self.blur_pending = false;
+        }
+        // 鼠标平滑跟随：镜面高光与视差共用同一条插值曲线。
+        // 按**时间**插值（不是按帧），帧率波动时速度一致；收敛后吸附并停止请求重绘。
+        let hover = ctx.input(|i| i.pointer.hover_pos());
+        let dt = (self.enter_now - self.fx_t).clamp(0.0, 0.10) as f32;
+        self.fx_t = self.enter_now;
+        if let Some(target) = hover.or(self.mouse_smooth) {
+            let cur = self.mouse_smooth.unwrap_or(target);
+            if (target - cur).length() <= MOUSE_SETTLE {
+                self.mouse_smooth = Some(target);
+            } else {
+                let k = 1.0 - (-dt / MOUSE_TAU).exp();
+                self.mouse_smooth = Some(cur + (target - cur) * k);
+                ctx.request_repaint();
+            }
+        }
+        let mouse = self.mouse_smooth.unwrap_or_else(|| ctx.screen_rect().center());
+        // 双模式底色：系统模糊生效 → 真半透明（桌面透得进来）；不生效 → 不透明兜底
+        let mut pal = if dark { Palette::dark() } else { Palette::light() };
+        if self.blur_active {
+            pal = pal.translucent();
+        }
+        pal.fx = Fx { mouse, blur: self.blur_active };
+        self.pal = pal;
+        let pal = self.pal;
         self.poll_hotkey_recording(ctx);
+
+        // ---- 背板预烘焙：尺寸 / 主题 / 透底 / DPI 任一变化时重建（拖拽缩放期间去抖）----
+        let ppp = ctx.pixels_per_point();
+        let screen = ctx.screen_rect();
+        let size = [
+            ((screen.width() * ppp).round() as usize).max(1),
+            ((screen.height() * ppp).round() as usize).max(1),
+        ];
+        let key = (size[0], size[1], pal.dark, pal.fx.blur);
+        // 主题 / 透底模式切换**立即**重建；另外把"占位贴图"（首帧尺寸还没定下来、
+        // 只有几像素的那种）也当紧急情况——否则它会陪跑整个去抖窗口，看起来就是一块纯色。
+        // 只有拖拽缩放这种连续尺寸变化才走去抖（期间沿用旧贴图，拉伸一帧无感）。
+        let mode_changed = (self.backdrop_key.2, self.backdrop_key.3) != (pal.dark, pal.fx.blur);
+        let placeholder = self.backdrop_key.0 < 16 || self.backdrop_key.1 < 16;
+        if self.backdrop_key != key && (self.backdrop.is_none() || mode_changed || placeholder || self.backdrop_baked_at.elapsed() >= BAKE_DEBOUNCE) {
+            let img = bake_backdrop(size, &pal, ppp);
+            match self.backdrop.as_mut() {
+                Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                None => self.backdrop = Some(ctx.load_texture("acaja-backdrop", img, egui::TextureOptions::LINEAR)),
+            }
+            self.backdrop_key = key;
+            self.backdrop_baked_at = Instant::now();
+        }
 
         egui::CentralPanel::default()
             .frame(Frame::none())
             .show(ctx, |ui| {
                 apply_style(ui, &pal);
                 let full = ui.max_rect();
-                paint_backdrop(ui.painter(), full, &pal);
+                paint_backdrop(ui.painter(), full, &pal, self.backdrop.as_ref().map(|t| t.id()));
 
                 let title_h = 58.0;
                 let bottom_h = 62.0;
@@ -3234,7 +3683,8 @@ impl eframe::App for AcajaApp {
             });
 
         // ---- 入场动画进行中才请求重绘（静止时完全不动，省电） ----
-        if self.enter_now - self.enter_t0 < (ENTER_DUR + ENTER_STAGGER * 4.0) as f64 {
+        // 覆盖到最后一个错峰序号（当前最多 4 张卡）
+        if self.enter_now - self.enter_t0 < (CARD_ENTER_DUR + ENTER_STAGGER * 4.0) as f64 {
             ctx.request_repaint();
         }
 

@@ -70,6 +70,13 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("gamepad", "手柄（Apex 瞄准吸附）", "Gamepad (Apex aim snapping)"),
     ("gamepad_fire_expand", "右扳机开火驱动扩散", "Right trigger drives spread"),
     ("gamepad_note", "手柄设置保存后立即生效（XInput，无手柄时自动降频轮询）", "Applies right after saving (XInput; polling slows down when no gamepad is connected)"),
+    ("glass", "毛玻璃", "Glass"),
+    ("glass_acrylic", "系统亚克力已启用", "System acrylic active"),
+    ("glass_aero", "已启用（Aero 模糊）", "Active (Aero blur)"),
+    ("glass_backdrop", "已启用（Win11 背板）", "Active (Win11 backdrop)"),
+    ("glass_checking", "检测中…", "Checking…"),
+    ("glass_note", "系统模糊生效时窗口用真半透明底（桌面透得进来）；不可用时自动改用不透明底，界面依旧完整", "When system blur is active the window uses a truly translucent base (the desktop shows through); otherwise it falls back to an opaque base and the UI stays complete"),
+    ("glass_unavailable", "不可用（已用不透明底兜底）", "Unavailable (opaque fallback)"),
     ("hollow_gap", "中心缺口（空心）", "Gap (hollow)"),
     ("hotkey", "快捷键", "Hotkey"),
     ("hotkey_clear", "清空", "Clear"),
@@ -272,6 +279,19 @@ mod tests {
         for k in ["tray_toggle", "tray_settings", "tray_quit"] {
             let ok = t(Lang::Zh, k).is_empty() || t(Lang::En, k).is_empty();
             assert!(!ok, "托盘 key 缺失或漏译: {k}");
+        }
+        // 「系统」分区的毛玻璃状态行：任何一个 key 漏译都会让状态行变成空白
+        for k in [
+            "glass",
+            "glass_acrylic",
+            "glass_aero",
+            "glass_backdrop",
+            "glass_checking",
+            "glass_note",
+            "glass_unavailable",
+        ] {
+            let ok = t(Lang::Zh, k).is_empty() || t(Lang::En, k).is_empty();
+            assert!(!ok, "毛玻璃状态 key 缺失或漏译: {k}");
         }
     }
 

@@ -1,6 +1,6 @@
 # ACAJA — Crosshair Overlay for Windows
 
-> **Current version v1.2.1**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
+> **Current version v1.2.2**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
 > Maintainers: see [AGENTS.md](AGENTS.md) (architecture map, how to verify, known pitfalls) and [WORKLOG.md](WORKLOG.md) (change log).
 
 ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` + Direct2D + egui) — a complete rewrite of [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN) (Python/PySide6). Click-through, zero runtime dependencies.
@@ -12,7 +12,7 @@ ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` +
 # 📖 User Guide
 
 ## 1. Download & Run
-1. Grab `ACAJA-v1.2.1-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
+1. Grab `ACAJA-v1.2.2-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
 2. Unzip and run `acaja.exe`. You get: the **settings window** (dark UI), a **red cross** at screen center (default), and a **tray icon**.
 3. Closing the settings window keeps the app running — the crosshair stays, tray controls everything.
 
@@ -102,22 +102,47 @@ src/
 ## Requirements
 - Windows 10 / 11 (x64). No runtime dependencies.
 
-## Iteration Roadmap (features first · backend stays absolutely lean)
+## Roadmap (current phase: **heavy UI development**)
 
 > Design law: **the backend `acaja.exe` stays absolutely clean and lightweight** — no UI framework, no extra threads/polling,
 > no system-wide hooks, no new dependencies. Heavy lifting lives only in the settings process `acaja-ui.exe` (launched on
 > demand, cost doesn't matter). No in-game quick panel.
+>
+> The user **cancelled** the previously planned feature iterations 2/3/4 (dynamic crosshair, multi-monitor integration,
+> usability polish); the settings UI is now the focus.
 
-| Iteration | Version | Theme | Status |
+| Stage | Version | Theme | Status |
 |---|---|---|---|
-| 1 | **v1.2.0** | Profile & editing workflow + Liquid Glass UI | ✅ released |
-| 1.5 | **v1.2.1** | **Visual revision** (per user feedback): deep black-grey + low-saturation neon violet / Klein blue, large-whitespace asymmetric grid, stronger glassmorphism, serif × sans type pairing, silky motion | ✅ this round |
-| 2 | v1.2.2 | Dynamic crosshair & firing feedback (recoil curve / burst stacking / fire source) | ⏳ next |
-| 3 | v1.2.3 | Multi-monitor & game integration (snap rules / per-monitor profiles / process picker) | ⏳ queued |
-| 4 | v1.3.0 | Usability polish (config backup & rollback / portable mode / tray preset submenu / perf panel) | ⏳ queued |
+| 1 | v1.2.0 | Profile & editing workflow (presets / hotkey recording / monitors / image picker / template gallery / live sync) | ✅ released |
+| 1.5 | v1.2.1 | Visual revision: deep black-grey glassmorphism + serif/sans pairing + silky motion | ✅ released |
+| 1.6 | **v1.2.2** | **Real frosted glass**: system acrylic + genuinely translucent base + mouse specular/parallax/edge refraction + eased motion + backdrop pre-bake | ✅ this round |
+| ~~2–4~~ | — | ~~dynamic crosshair / multi-monitor / usability polish~~ | ❌ cancelled by the user |
 
-> Version note: the four **feature** iterations are unchanged; v1.2.1 is a **visual revision** inserted after
-> iteration 1 at the user's request, so iterations 2/3/4 shift to v1.2.2 / v1.2.3 / v1.3.0.
+### Stage 1.6 (v1.2.2) — shipped
+
+- **Real frosted glass** (root cause of the previous "flat" look): the window's own base layer went from 96 % opaque to
+  **~35 % translucent** (composite alpha ≈ 0.48) and system blur is now actually enabled — acrylic
+  (`SetWindowCompositionAttribute`, Win10 1803+/Win11) → Win11 system backdrop (with the DWM glass extended into the client
+  area, otherwise an undecorated window shows nothing) → Aero blur, in that order, with an **opaque fallback** when the OS
+  offers none (the UI stays complete either way). Also fixed colour leaking through the rounded window corners.
+- **Glass thickness**: cursor-following specular highlight (window-wide + per panel, clipped to the rounded shapes),
+  reversed parallax (−9 px blobs / −2.6 px panels) and edge refraction bands that follow the light direction.
+- **Motion no longer stiff** (root cause: `animate_bool_with_time` uses **linear** easing internally): switched to
+  `*_and_easing` (cubic_out / expo_out / quadratic_out) with a per-scene timing table, removed the instant jumps
+  (nav foreground, preset activation), enabled `scroll_animation` smooth scrolling, fixed a flash fade-out that waited for
+  mouse events, and stopped repainting once animations settle (zero repaints when idle).
+- **Performance** (the other half of smoothness): the backdrop is now rasterised once into a texture on the CPU
+  (rebuilt on size/theme/translucency change, debounced) instead of ~230 shapes per frame; panel shadows went 12 → 6 layers.
+- The System section shows the **glass status** (acrylic / Win11 backdrop / Aero / opaque fallback) so you don't need logs.
+
+### Next UI work (pending your direction)
+
+1. **On-device feedback**: glass intensity (transparency alpha), highlight/parallax strength, animation timings — all one-line tunables.
+2. If system blur is unavailable on your machine: alternative "capture the desktop behind the window and blur it ourselves".
+3. **Optional WebView2 web-UI PoC** (feasibility notes in WORKLOG): CSS `backdrop-filter`, blend modes and easing control far
+   exceed what egui offers; the cost is a WebView2 runtime dependency, a full UI rewrite, and it still needs the OS blur for
+   real desktop frost.
+4. Continued polish: scroll inertia, section-switch motion, slider drag physics, repaint cost while dragging the window.
 
 ### Iteration 1 (v1.2.0) — shipped
 
@@ -153,25 +178,6 @@ src/
   (staggered, played once); section switches cross-fade; idle frames don't repaint.
 
 > Backend check: the ~9.5 MB of new font assets ship only in the settings process — `acaja.exe` stays at **3.04 MB**.
-
-### Iteration 2 (v1.2.2) — next up
-- Per-shot **recoil curve** (burst stacking, per-shot delta, cap, recovery rate) with a visual preview of the expansion;
-- independent fire sources (left mouse button / gamepad RT);
-- muzzle/hit flash indicator and an alternative recovery-bar style.
-- Explicitly NOT doing: keyboard-hook "hold hotkey" (violates the lightweight law; mouse right-button / gamepad hold modes cover it).
-
-### Iteration 3 (v1.2.2) — multi-monitor & game integration
-- Snap rules (window work area / client area) with a tunable vertical offset factor;
-- per-monitor profile bindings;
-- game-binding "auto-detect": pick the exe from running processes instead of typing it;
-- "auto-hide when the game is not foreground".
-
-### Iteration 4 (v1.3.0) — usability polish
-- Timestamped config backups + one-click rollback;
-- portable mode (config next to the exe);
-- tray preset submenu (menu built in the backend, zero new threads);
-- performance panel (sampled from the UI process, zero backend cost);
-- bilingual/doc consistency audit and a first-run guide.
 
 ## License
 MIT. Original author: 林晓CCC — Bilibili: https://space.bilibili.com/622769073
