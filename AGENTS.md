@@ -125,7 +125,32 @@ gh run watch $(gh run list --limit 1 --json databaseId -q '.[0].databaseId')
 用户端排查：主程序加 `--diag` 参数运行会写 `%APPDATA%/ACAJACrosshair/acaja-diag.log`；
 崩溃信息恒定写在 `acaja-crash.log`；配置文件可手改（`app.json` / `presets/*.json`）。
 
-## 6. 当前边界 / 已知未做
+## 6. 未来分支路线：WebView2 网页界面（2026-09-11 评估，**暂不实施**）
+
+用户问过能否把设置界面改成网页。结论：**可行，但不是银弹**，留作以后可选分支。要点（评估过、留档）：
+
+**关键事实（先破误区）**：CSS `backdrop-filter` **无法采样桌面**（Chromium 视透明窗口背后为空像素，Microsoft/Chromium issue 有记录），
+所以「换网页 = 自动有桌面毛玻璃」是错的 —— 桌面磨砂**只能由系统合成器提供**，也就是我们已经实现的
+`system/windowfx.rs`（亚克力 / Win11 背板 / Aero）那套，**可被网页宿主直接复用**。
+
+**推荐的实施形态**（若将来要做）：
+1. **设置进程内嵌 WebView2**（首选）：宿主窗口加系统模糊 + WebView2 背景透明（`put_DefaultBackgroundColor(透明)` /
+   `WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00FFFFFF`，须在初始化前设置），页面透明处即显示系统模糊后的桌面；
+   页面内部再用 CSS `backdrop-filter` 做页内层级玻璃。
+2. 备选：本地 HTTP 服务 + 浏览器标签页（无桌面磨砂、无依赖，适合顺便从别的设备调参）。
+3. 不推荐 Tauri 重写（多一层框架，收益与 1 相同）。
+
+**收益**：CSS 表现力（页内模糊/混合模式/SVG 滤镜/任意缓动/字体渲染）、**改样式无需重编译 Rust**（秒级迭代）、可用现成组件库。
+**代价**：WebView2 运行时依赖（Win11 自带；Win10 通常随 Edge 存在，可在检测缺失时提示或内置固定版 ~180MB）、
+设置进程内存 ~100–200MB、界面整体重写（现有 egui 约 3400 行 → HTML/CSS/JS 约 2500–3000 行）、
+无边框拖拽/缩放、DPI、字体嵌入都要重做。
+
+**PoC 范围（约 1 轮，不改默认行为）**：给 `acaja-ui.exe` 加 `--web` 开关 →
+透明 WebView2 + 宿主系统模糊 + 一个真实页面（读取并实时推送当前预设）+ **原生界面保留为回退**
+（WebView2 缺失/初始化失败自动落回 egui）。用户实测对比后再决定是否迁移。
+Rust 侧可用 `webview2-com`（微软官方绑定）或 `wry`；仓库已经有 `windows` crate 依赖。
+
+## 7. 当前边界 / 已知未做
 
 - 独占全屏（D3D exclusive）游戏无法覆盖（系统级限制，任何 overlay 工具都不行）。
 - 自定义图片目前手填路径（没有文件选择器）；游戏绑定需手填进程名。

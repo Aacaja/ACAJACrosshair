@@ -4,8 +4,10 @@
 //! 视觉：**全部自绘**（深黑灰底 + 低饱和霓虹紫/克莱因蓝色相光斑 + 强毛玻璃叠加 + 镜面边 + 分层阴影），
 //!       不依赖系统透明能力——系统透明不可用时界面依然是完整正确的；Win11 上再由
 //!       `windowfx::apply_once` 叠加系统圆角 / 亚克力背板（失败静默降级）。
-//! 透感（v1.3.1）：**双模式底色**——`windowfx::blur_active()` 为真时走 `Palette::translucent()`
-//!       （基底 alpha 88 ≈0.35、渐变层 ≤58，桌面透得进来），为假时保持不透明底兜底。
+//! 透感（v1.2.2 起）：**双模式底色**——`windowfx::blur_active()` 为真时走 `Palette::translucent(level)`
+//!       （基底 alpha 按玻璃强度在 74~150 之间插值，其余层同比缩放，桌面透得进来），
+//!       为假时保持不透明底兜底（此时忽略强度）。毛玻璃模式与强度是应用级设置，
+//!       在「系统」分区调节、写回 `store.app.glass` 并在启动时恢复。
 //!       玻璃"有厚度"靠三件事：跟随鼠标的径向高光（整窗 430px + 每张面板）、
 //!       光斑 9px / 面板 2.6px 的**反向视差**、按光照方向（光标侧亮、背面暗）的 1.5px 边缘折射带。
 //! 排版：**三族分工**——`FontFamily::Name("serif")` 衬线（标题 / 大字 / 序号）、
@@ -41,13 +43,13 @@ use egui::{
 use log::{info, warn};
 
 use crate::config::{
-    AdsButton, AdsMode, GameBinding, Hotkey, PosVal, Preset, PresetStore, RightClickMode,
+    AdsButton, AdsMode, GameBinding, GlassMode, Hotkey, PosVal, Preset, PresetStore, RightClickMode,
     Shape as CrossShape,
     MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use crate::i18n::Lang;
 use crate::system::monitor::MonitorInfo;
-use crate::ui::strings::{ads_mode_name, shape_name, t};
+use crate::ui::strings::{ads_mode_name, glass_mode_name, shape_name, t};
 
 const STATUS_TTL: Duration = Duration::from_millis(1900);
 /// 实时预览推送的最小间隔：拖动滑杆时约 7 次/秒，足够跟手，也不会打扰主程序
@@ -112,6 +114,22 @@ const PANEL_PARALLAX: f32 = 2.6;
 const GLOW_RADIUS: f32 = 430.0;
 /// 背板预烘焙的去抖时长：拖拽缩放时尺寸每帧都变，等停下再重烘焙
 const BAKE_DEBOUNCE: Duration = Duration::from_millis(140);
+
+// ---- 玻璃强度令牌（对应 `config::GlassConfig.level`，用户可在「系统」分区调节）----
+// 语义：**值越大越透**。强度只影响基底的透明度，其余层按同一比例缩放；
+// 系统模糊不生效时（`blur_active() == false`）整套忽略，走不透明兜底。
+/// 强度下限（最实）
+const GLASS_MIN: f32 = 0.3;
+/// 强度上限（最透）
+const GLASS_MAX: f32 = 1.0;
+/// 滑杆步进
+const GLASS_STEP: f32 = 0.05;
+/// 强度 = 1.0 时的基底 alpha（最透）
+const GLASS_ALPHA_MAX: f32 = 74.0;
+/// 强度 = 0.3 时的基底 alpha（较实）
+const GLASS_ALPHA_MIN: f32 = 150.0;
+/// 参考：原透明模式硬编码的基底 alpha —— 其余层的缩放系数 = 当前基底 alpha / 该值
+const GLASS_ALPHA_REF: f32 = 88.0;
 
 // ---- 字体族助手（族名由 `fonts::install` 保证存在，失败时内部已回退）------
 
@@ -254,6 +272,13 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
+/// 玻璃强度 → 真透底基底 alpha：level 1.0（最透）→ [`GLASS_ALPHA_MAX`]，
+/// level 0.3（较实）→ [`GLASS_ALPHA_MIN`]，中间线性插值（配置越界也先夹回区间）。
+fn glass_alpha(level: f32) -> f32 {
+    let t = (level.clamp(GLASS_MIN, GLASS_MAX) - GLASS_MIN) / (GLASS_MAX - GLASS_MIN);
+    GLASS_ALPHA_MIN + (GLASS_ALPHA_MAX - GLASS_ALPHA_MIN) * t
+}
+
 impl Palette {
     /// 深色（默认）：底 #08080A~#101014/#060608；accent #6C5CE7 + 深紫 #4B3FA8 + 克莱因蓝 #002FA7
     fn dark() -> Self {
@@ -339,41 +364,51 @@ impl Palette {
 
     /// **真透底变体**：系统模糊生效（`fx.blur`）时用这一套，桌面透过玻璃仍能看到轮廓与色相。
     ///
-    /// 具体数值（深色）：基底 alpha **88**（≈0.35）、渐变层 **54 / 58**（≤60）、
-    /// 玻璃面 14、镜面高光 48；同时把光斑（138/150/120/72）与网格 / 噪点强度提高，
-    /// 否则叠在真实桌面上层次会被冲淡（纯色壁纸上也要"像玻璃"）。
-    /// 浅色：基底 150、渐变 118/112（雾白玻璃），光斑与描边对应加强。
-    /// 不生效时**完全不调用本函数** → 保持原来的不透明底（安全兜底）。
-    fn translucent(mut self) -> Self {
+    /// `level`（0.3~1.0，**越大越透**）来自用户滑杆：基底 alpha 在 [`GLASS_ALPHA_MAX`]
+    /// （level 1.0）与 [`GLASS_ALPHA_MIN`]（level 0.3）之间线性插值，其余层
+    /// （渐变 / 光斑 / 玻璃面 / 描边 / 内凹控件 / 阴影）按**同一系数** `k` 同步缩放——
+    /// 强度只改"玻璃有多厚"，层与层之间的相对关系保持不变。
+    ///
+    /// 参考值（深色，k = 1）：基底 88、渐变 54 / 58、玻璃面 14、镜面高光 48、
+    /// 光斑 138/150/120/72、描边 34、输入框 148、色井 122、滑杆槽 38、控件底 30、阴影 190；
+    /// 浅色用各自的一组参考值、同一个 k。网格 / 噪点强度与系统模糊绑定，
+    /// 由 [`bake_backdrop`] 决定。
+    ///
+    /// 系统模糊**不生效时完全不调用本函数** → 保持不透明底，强度被忽略（安全兜底）。
+    fn translucent(mut self, level: f32) -> Self {
+        // 统一缩放系数：>1 = 更实（更不透明），<1 = 更透
+        let k = glass_alpha(level) / GLASS_ALPHA_REF;
+        // 参考 alpha × k 写回；低强度下个别层会顶到 255，这里夹住
+        let a8 = |base: f32| (base * k).round().clamp(0.0, 255.0) as u8;
         if self.dark {
-            self.bg_base = rgba(8, 8, 10, 88);
-            self.bg_top = rgba(16, 16, 20, 54);
-            self.bg_bottom = rgba(6, 6, 8, 58);
-            self.blob_a = rgba(108, 92, 231, 138);
-            self.blob_b = rgba(0, 47, 167, 150);
-            self.blob_c = rgba(75, 63, 168, 120);
-            self.blob_d = rgba(108, 92, 231, 72);
-            self.glass = rgba(255, 255, 255, 14);
-            self.glass_hi = rgba(255, 255, 255, 48);
-            self.border = rgba(255, 255, 255, 34);
+            self.bg_base = rgba(8, 8, 10, a8(88.0));
+            self.bg_top = rgba(16, 16, 20, a8(54.0));
+            self.bg_bottom = rgba(6, 6, 8, a8(58.0));
+            self.blob_a = rgba(108, 92, 231, a8(138.0));
+            self.blob_b = rgba(0, 47, 167, a8(150.0));
+            self.blob_c = rgba(75, 63, 168, a8(120.0));
+            self.blob_d = rgba(108, 92, 231, a8(72.0));
+            self.glass = rgba(255, 255, 255, a8(14.0));
+            self.glass_hi = rgba(255, 255, 255, a8(48.0));
+            self.border = rgba(255, 255, 255, a8(34.0));
         } else {
-            self.bg_base = rgba(246, 247, 250, 150);
-            self.bg_top = rgba(255, 255, 255, 118);
-            self.bg_bottom = rgba(228, 230, 238, 112);
-            self.blob_a = rgba(108, 92, 231, 74);
-            self.blob_b = rgba(0, 47, 167, 58);
-            self.blob_c = rgba(75, 63, 168, 54);
-            self.blob_d = rgba(108, 92, 231, 42);
-            self.glass = rgba(255, 255, 255, 176);
-            self.glass_hi = rgba(255, 255, 255, 226);
-            self.border = rgba(24, 30, 52, 52);
+            self.bg_base = rgba(246, 247, 250, a8(150.0));
+            self.bg_top = rgba(255, 255, 255, a8(118.0));
+            self.bg_bottom = rgba(228, 230, 238, a8(112.0));
+            self.blob_a = rgba(108, 92, 231, a8(74.0));
+            self.blob_b = rgba(0, 47, 167, a8(58.0));
+            self.blob_c = rgba(75, 63, 168, a8(54.0));
+            self.blob_d = rgba(108, 92, 231, a8(42.0));
+            self.glass = rgba(255, 255, 255, a8(176.0));
+            self.glass_hi = rgba(255, 255, 255, a8(226.0));
+            self.border = rgba(24, 30, 52, a8(52.0));
         }
         // 内凹控件（输入框 / 滑杆槽 / 色井）在透底上要更明确，否则会"糊"进桌面
-        self.input = with_alpha(self.input, if self.dark { 148 } else { 204 });
-        self.well = with_alpha(self.well, if self.dark { 122 } else { 34 });
-        self.track = with_alpha(self.track, if self.dark { 38 } else { 46 });
-        self.control = with_alpha(self.control, 30);
-        self.shadow = with_alpha(self.shadow, if self.dark { 190 } else { 88 });
+        self.input = with_alpha(self.input, a8(if self.dark { 148.0 } else { 204.0 }));
+        self.well = with_alpha(self.well, a8(if self.dark { 122.0 } else { 34.0 }));
+        self.track = with_alpha(self.track, a8(if self.dark { 38.0 } else { 46.0 }));
+        self.control = with_alpha(self.control, a8(30.0));
+        self.shadow = with_alpha(self.shadow, a8(if self.dark { 190.0 } else { 88.0 }));
         self
     }
 
@@ -1396,6 +1431,10 @@ pub struct AcajaApp {
     enter_now: f64,
 
     // ---- v1.3.1：真透底 + 玻璃厚度 ----
+    /// 毛玻璃来源（应用级设置；与 `store.app.glass.mode` 同步，切换时写回并重新申请）
+    glass_mode: GlassMode,
+    /// 玻璃强度 0.3~1.0（与 `store.app.glass.level` 同步；仅系统模糊生效时影响底色）
+    glass_level: f32,
     /// 系统模糊是否生效（每帧读 `windowfx::blur_active()`）→ 决定用真半透明底还是不透明兜底
     blur_active: bool,
     /// `windowfx::apply_once()` 的实际结果（`None` = 三种方式都失败）
@@ -1408,8 +1447,11 @@ pub struct AcajaApp {
     fx_t: f64,
     /// 背板预烘焙贴图（基底 + 渐变 + 网格 + 噪点，一次性栅格化）
     backdrop: Option<egui::TextureHandle>,
-    /// 贴图缓存键：(像素宽, 像素高, 深色, 透底)
-    backdrop_key: (usize, usize, bool, bool),
+    /// 贴图缓存键：(像素宽, 像素高, 深色, 透底, 玻璃强度×100)
+    ///
+    /// **强度必须在键里**：它决定底色每一层的 alpha，只有重烘焙才会反映到贴图上
+    /// （无系统模糊时强度被忽略，末位固定 0，避免白烘）。
+    backdrop_key: (usize, usize, bool, bool, u8),
     /// 上次烘焙时刻（拖拽缩放的连续变化按 [`BAKE_DEBOUNCE`] 去抖）
     backdrop_baked_at: Instant,
 }
@@ -1451,10 +1493,13 @@ impl AcajaApp {
         let fs = fonts::install(&cc.egui_ctx);
         info!("字体安装: sans={} serif={} bold={}", fs.sans, fs.serif, fs.bold);
 
-        let (preset, active_name, lang, theme) = {
+        let (preset, active_name, lang, theme, glass) = {
             let g = store.lock();
-            (g.get_active().clone(), g.active_name(), g.app.lang(), g.app.theme.clone())
+            (g.get_active().clone(), g.active_name(), g.app.lang(), g.app.theme.clone(), g.app.glass)
         };
+        // 恢复上次选择的毛玻璃来源（强度不必预置：每帧由 `glass_level` 直接算底色）。
+        // 首帧 `update` 里的 `apply_once` 就会按这个模式申请系统模糊。
+        crate::system::windowfx::set_mode(glass.mode);
         let dark = match theme.as_str() {
             "light" => false,
             _ => true,
@@ -1524,13 +1569,15 @@ impl AcajaApp {
             tpl_previews,
             enter_t0: 0.0,
             enter_now: 0.0,
+            glass_mode: glass.mode,
+            glass_level: glass.level_clamped(),
             blur_active: false,
             blur_kind: None,
             blur_pending: true,
             mouse_smooth: None,
             fx_t: 0.0,
             backdrop: None,
-            backdrop_key: (0, 0, false, false),
+            backdrop_key: (0, 0, false, false, 0),
             backdrop_baked_at: Instant::now(),
         };
         app.sync_buffers();
@@ -2954,6 +3001,59 @@ impl AcajaApp {
                 );
             });
             note(ui, pal, t(lang, "glass_note"));
+
+            // ---- 毛玻璃模式：不同系统能用的模糊方式不同（亚克力 / Win11 背板），
+            // 观感差异只有真机看得出来，所以给用户手动切换、实时对比 ----
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                field_label(ui, pal, t(lang, "glass_mode"));
+                let w = ui.available_width() - 4.0;
+                let cur = glass_mode_name(lang, self.glass_mode);
+                let mut picked: Option<GlassMode> = None;
+                combo(ui, w.max(140.0), "glass_mode", cur.to_string(), |ui| {
+                    for m in [GlassMode::Auto, GlassMode::Acrylic, GlassMode::Backdrop, GlassMode::Off] {
+                        if ui.selectable_label(self.glass_mode == m, glass_mode_name(lang, m)).clicked() {
+                            picked = Some(m);
+                        }
+                    }
+                });
+                if let Some(m) = picked {
+                    if m != self.glass_mode {
+                        self.glass_mode = m;
+                        {
+                            let mut store = self.store.lock();
+                            store.app.glass.mode = m;
+                            let _ = store.save_app();
+                        }
+                        // 模式必须重新申请系统模糊才立刻生效；强度不用（只改底色 → 重烘焙贴图）
+                        crate::system::windowfx::set_mode(m);
+                        self.blur_kind = match crate::system::windowfx::reapply() {
+                            Some(crate::system::windowfx::BlurKind::None) | None => None,
+                            k => k,
+                        };
+                        self.blur_pending = false;
+                        self.blur_active = crate::system::windowfx::blur_active();
+                        self.flash(t(lang, "saved").to_string());
+                    }
+                }
+            });
+            // ---- 玻璃强度：越大越透（仅系统模糊生效时有效，无模糊时忽略）----
+            let mut lvl = self.glass_level;
+            if slider_row(ui, pal, t(lang, "glass_level"), |ui, w| {
+                slider_f32(ui, pal, "glass_level", &mut lvl, Rangef::new(GLASS_MIN, GLASS_MAX), w, 2, "")
+            }) {
+                // 滑杆连续取值 → 量化到 0.05 步进并消掉浮点尾数（显示两位小数）；
+                // 只有真正跨过一个步进才落库，拖动时不会每帧写盘
+                let q = (((lvl / GLASS_STEP).round() * GLASS_STEP) * 100.0).round() / 100.0;
+                let q = q.clamp(GLASS_MIN, GLASS_MAX);
+                if (q - self.glass_level).abs() > f32::EPSILON {
+                    self.glass_level = q;
+                    let mut store = self.store.lock();
+                    store.app.glass.level = q;
+                    let _ = store.save_app();
+                }
+            }
+            note(ui, pal, t(lang, "glass_level_hint"));
         });
     }
 
@@ -3565,10 +3665,11 @@ impl eframe::App for AcajaApp {
             }
         }
         let mouse = self.mouse_smooth.unwrap_or_else(|| ctx.screen_rect().center());
-        // 双模式底色：系统模糊生效 → 真半透明（桌面透得进来）；不生效 → 不透明兜底
+        // 双模式底色：系统模糊生效 → 真半透明（桌面透得进来，透明度由玻璃强度决定）；
+        // 不生效 → 不透明兜底，此时**忽略强度**（`translucent` 整个不参与）
         let mut pal = if dark { Palette::dark() } else { Palette::light() };
         if self.blur_active {
-            pal = pal.translucent();
+            pal = pal.translucent(self.glass_level);
         }
         pal.fx = Fx { mouse, blur: self.blur_active };
         self.pal = pal;
@@ -3582,20 +3683,30 @@ impl eframe::App for AcajaApp {
             ((screen.width() * ppp).round() as usize).max(1),
             ((screen.height() * ppp).round() as usize).max(1),
         ];
-        let key = (size[0], size[1], pal.dark, pal.fx.blur);
+        // 缓存键必须含**玻璃强度**：强度决定真透底每一层的 alpha，不进键的话调滑杆不会重绘。
+        // 无系统模糊时强度被忽略（底色不透明），末位固定 0，避免无效重烘焙。
+        let level_q = if pal.fx.blur { (self.glass_level * 100.0).round().clamp(0.0, 255.0) as u8 } else { 0 };
+        let key = (size[0], size[1], pal.dark, pal.fx.blur, level_q);
         // 主题 / 透底模式切换**立即**重建；另外把"占位贴图"（首帧尺寸还没定下来、
         // 只有几像素的那种）也当紧急情况——否则它会陪跑整个去抖窗口，看起来就是一块纯色。
-        // 只有拖拽缩放这种连续尺寸变化才走去抖（期间沿用旧贴图，拉伸一帧无感）。
+        // 连续变化（拖拽缩放、拖玻璃强度滑杆）走去抖（期间沿用旧贴图，几乎无感）。
         let mode_changed = (self.backdrop_key.2, self.backdrop_key.3) != (pal.dark, pal.fx.blur);
         let placeholder = self.backdrop_key.0 < 16 || self.backdrop_key.1 < 16;
-        if self.backdrop_key != key && (self.backdrop.is_none() || mode_changed || placeholder || self.backdrop_baked_at.elapsed() >= BAKE_DEBOUNCE) {
-            let img = bake_backdrop(size, &pal, ppp);
-            match self.backdrop.as_mut() {
-                Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
-                None => self.backdrop = Some(ctx.load_texture("acaja-backdrop", img, egui::TextureOptions::LINEAR)),
+        if self.backdrop_key != key {
+            let waited = self.backdrop_baked_at.elapsed();
+            if self.backdrop.is_none() || mode_changed || placeholder || waited >= BAKE_DEBOUNCE {
+                let img = bake_backdrop(size, &pal, ppp);
+                match self.backdrop.as_mut() {
+                    Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                    None => self.backdrop = Some(ctx.load_texture("acaja-backdrop", img, egui::TextureOptions::LINEAR)),
+                }
+                self.backdrop_key = key;
+                self.backdrop_baked_at = Instant::now();
+            } else {
+                // 去抖窗口内：预约一次到期重绘——松手后最后一次改动**一定**会落到贴图上，
+                // 不会因为不再有输入而停在旧贴图。
+                ctx.request_repaint_after(BAKE_DEBOUNCE.saturating_sub(waited));
             }
-            self.backdrop_key = key;
-            self.backdrop_baked_at = Instant::now();
         }
 
         egui::CentralPanel::default()
@@ -3820,3 +3931,4 @@ mod tests {
         assert!(Hotkey::default().is_empty());
     }
 }
+

@@ -654,6 +654,49 @@ pub struct GameBinding {
     pub preset: String,
 }
 
+/// 毛玻璃来源（应用级设置：不同系统的可用能力不同，用户可手动指定）
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlassMode {
+    /// 自动：亚克力 → Win11 背板 → Aero 逐级尝试（默认）
+    #[default]
+    Auto,
+    /// 只试未公开的亚克力（SetWindowCompositionAttribute）
+    Acrylic,
+    /// 只试 Win11 系统背板（DWM，官方支持路径）
+    Backdrop,
+    /// 关闭：始终用不透明底
+    Off,
+}
+
+/// 毛玻璃设置
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct GlassConfig {
+    /// 模糊来源
+    #[serde(default)]
+    pub mode: GlassMode,
+    /// 玻璃强度 0.0~1.0（越大越透；仅在有系统模糊时生效）
+    #[serde(default = "default_glass_level")]
+    pub level: f32,
+}
+
+fn default_glass_level() -> f32 {
+    0.8
+}
+
+impl Default for GlassConfig {
+    fn default() -> Self {
+        GlassConfig { mode: GlassMode::Auto, level: default_glass_level() }
+    }
+}
+
+impl GlassConfig {
+    /// 强度夹到可用区间（配置可能被手改）
+    pub fn level_clamped(&self) -> f32 {
+        self.level.clamp(0.3, 1.0)
+    }
+}
+
 /// 应用级配置 app.json
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -666,6 +709,9 @@ pub struct AppConfig {
     pub theme: String,
     #[serde(default)]
     pub autostart: bool,
+    /// 毛玻璃设置（模式 + 强度）
+    #[serde(default)]
+    pub glass: GlassConfig,
     #[serde(default)]
     pub last_preset: String,
     #[serde(default)]
@@ -683,6 +729,7 @@ impl Default for AppConfig {
             language: "zh".to_string(),
             theme: default_theme(),
             autostart: false,
+            glass: GlassConfig::default(),
             last_preset: "default".to_string(),
             game_bindings: Vec::new(),
         }
@@ -1329,6 +1376,22 @@ mod tests {
         // 无修饰键也要能往返
         let hk = Hotkey { modifiers: MOD_NONE, vk: 0x42 };
         assert_eq!(Hotkey::parse(&hk.to_string()), Some(hk));
+    }
+
+    #[test]
+    fn glass_config_defaults_and_clamp() {
+        let g = GlassConfig::default();
+        assert_eq!(g.mode, GlassMode::Auto);
+        assert!((g.level - 0.8).abs() < 1e-6);
+        // 手改配置越界也要夹回来
+        let wild = GlassConfig { mode: GlassMode::Backdrop, level: 9.0 };
+        assert!((wild.level_clamped() - 1.0).abs() < 1e-6);
+        let tiny = GlassConfig { mode: GlassMode::Off, level: -3.0 };
+        assert!((tiny.level_clamped() - 0.3).abs() < 1e-6);
+        // app.json 往返（老文件没有 glass 字段 → 用默认值）
+        let app: AppConfig = serde_json::from_str("{\"language\":\"en\"}").unwrap();
+        assert_eq!(app.glass.mode, GlassMode::Auto);
+        assert!((app.glass.level - 0.8).abs() < 1e-6);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # ACAJA — Crosshair Overlay for Windows
 
-> **Current version v1.2.2**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
+> **Current version v1.2.3**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
 > Maintainers: see [AGENTS.md](AGENTS.md) (architecture map, how to verify, known pitfalls) and [WORKLOG.md](WORKLOG.md) (change log).
 
 ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` + Direct2D + egui) — a complete rewrite of [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN) (Python/PySide6). Click-through, zero runtime dependencies.
@@ -12,7 +12,7 @@ ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` +
 # 📖 User Guide
 
 ## 1. Download & Run
-1. Grab `ACAJA-v1.2.2-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
+1. Grab `ACAJA-v1.2.3-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
 2. Unzip and run `acaja.exe`. You get: the **settings window** (dark UI), a **red cross** at screen center (default), and a **tray icon**.
 3. Closing the settings window keeps the app running — the crosshair stays, tray controls everything.
 

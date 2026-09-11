@@ -8,7 +8,7 @@
 //!
 //! 表必须按 key 升序（`binary_search` 的前提，由 `table_sorted_and_unique` 强制）。
 
-use crate::config::AdsMode;
+use crate::config::{AdsMode, GlassMode};
 use crate::i18n::Lang;
 
 /// 全部 UI 文案：(key, 中文, English)，按 key 升序
@@ -75,6 +75,13 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("glass_aero", "已启用（Aero 模糊）", "Active (Aero blur)"),
     ("glass_backdrop", "已启用（Win11 背板）", "Active (Win11 backdrop)"),
     ("glass_checking", "检测中…", "Checking…"),
+    ("glass_level", "玻璃强度", "Glass strength"),
+    ("glass_level_hint", "越大越透；仅系统模糊生效时有效", "Higher = more transparent; takes effect only when system blur is active"),
+    ("glass_mode", "毛玻璃模式", "Glass mode"),
+    ("glass_mode_acrylic", "亚克力", "Acrylic"),
+    ("glass_mode_auto", "自动", "Auto"),
+    ("glass_mode_backdrop", "Win11 背板", "Win11 backdrop"),
+    ("glass_mode_off", "关闭", "Off"),
     ("glass_note", "系统模糊生效时窗口用真半透明底（桌面透得进来）；不可用时自动改用不透明底，界面依旧完整", "When system blur is active the window uses a truly translucent base (the desktop shows through); otherwise it falls back to an opaque base and the UI stays complete"),
     ("glass_unavailable", "不可用（已用不透明底兜底）", "Unavailable (opaque fallback)"),
     ("hollow_gap", "中心缺口（空心）", "Gap (hollow)"),
@@ -249,6 +256,17 @@ pub fn ads_mode_name(lang: Lang, mode: AdsMode) -> &'static str {
     t(lang, key)
 }
 
+/// 毛玻璃模式名文案（下拉框用；与 [`GlassMode`] 一一对应）
+pub fn glass_mode_name(lang: Lang, mode: GlassMode) -> &'static str {
+    let key = match mode {
+        GlassMode::Auto => "glass_mode_auto",
+        GlassMode::Acrylic => "glass_mode_acrylic",
+        GlassMode::Backdrop => "glass_mode_backdrop",
+        GlassMode::Off => "glass_mode_off",
+    };
+    t(lang, key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +305,13 @@ mod tests {
             "glass_aero",
             "glass_backdrop",
             "glass_checking",
+            "glass_level",
+            "glass_level_hint",
+            "glass_mode",
+            "glass_mode_acrylic",
+            "glass_mode_auto",
+            "glass_mode_backdrop",
+            "glass_mode_off",
             "glass_note",
             "glass_unavailable",
         ] {
@@ -305,6 +330,15 @@ mod tests {
         for m in [AdsMode::Off, AdsMode::HoldHide, AdsMode::Toggle, AdsMode::HoldShow] {
             assert!(!ads_mode_name(Lang::Zh, m).is_empty());
             assert!(!ads_mode_name(Lang::En, m).is_empty());
+        }
+    }
+
+    /// 毛玻璃模式下拉：key 拼错同样会渲染成空白项
+    #[test]
+    fn every_glass_mode_has_label() {
+        for m in [GlassMode::Auto, GlassMode::Acrylic, GlassMode::Backdrop, GlassMode::Off] {
+            assert!(!glass_mode_name(Lang::Zh, m).is_empty(), "毛玻璃模式缺中文: {m:?}");
+            assert!(!glass_mode_name(Lang::En, m).is_empty(), "毛玻璃模式缺英文: {m:?}");
         }
     }
 }

@@ -19,7 +19,9 @@
 //! 网页里的 `backdrop-filter` 模糊的是「页面自己的背景」，不是桌面。
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering};
+
+use crate::config::GlassMode;
 
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -36,6 +38,40 @@ use windows::Win32::UI::WindowsAndMessaging::{
 static BLUR_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// 已尝试过（无论成功失败，避免每帧重复尝试）
 static APPLIED: AtomicBool = AtomicBool::new(false);
+/// 用户选择的毛玻璃模式（0=Auto 1=Acrylic 2=Backdrop 3=Off）
+static MODE: AtomicU8 = AtomicU8::new(0);
+/// 已找到的窗口句柄（切换模式时重试用，避免重复枚举）
+static HWND_CACHE: AtomicIsize = AtomicIsize::new(0);
+/// 当前实际生效的方式（[`BlurKind`] 的判别值，0 = None）
+static CURRENT: AtomicU8 = AtomicU8::new(0);
+
+fn mode_code(m: GlassMode) -> u8 {
+    match m {
+        GlassMode::Auto => 0,
+        GlassMode::Acrylic => 1,
+        GlassMode::Backdrop => 2,
+        GlassMode::Off => 3,
+    }
+}
+
+fn code_to_mode(c: u8) -> GlassMode {
+    match c {
+        1 => GlassMode::Acrylic,
+        2 => GlassMode::Backdrop,
+        3 => GlassMode::Off,
+        _ => GlassMode::Auto,
+    }
+}
+
+/// 设置毛玻璃模式（用户在设置界面切换时调用；调用后需 [`reapply`] 才会立刻生效）
+pub fn set_mode(mode: GlassMode) {
+    MODE.store(mode_code(mode), Ordering::Relaxed);
+}
+
+/// 当前模式
+pub fn mode() -> GlassMode {
+    code_to_mode(MODE.load(Ordering::Relaxed))
+}
 
 /// `DWMWA_WINDOW_CORNER_PREFERENCE`（Win11 起）：`DWMWCP_ROUND = 2`
 const DWMWA_WINDOW_CORNER_PREFERENCE: i32 = 33;
@@ -179,27 +215,78 @@ fn try_backdrop(hwnd: HWND) -> bool {
 }
 
 /// 立即应用（可重复调用；成功后置 [`blur_active`]）。返回实际生效的方式。
+///
+/// 策略顺序由 [`mode`] 决定：Auto = 亚克力 → Win11 背板 → Aero；Acrylic/Backdrop 只试对应一条；
+/// Off = 不申请模糊（界面用不透明底）。用户可在设置界面切换，用于对比不同系统的观感差异。
 pub fn apply(hwnd: HWND) -> BlurKind {
+    HWND_CACHE.store(hwnd.0 as isize, Ordering::Relaxed);
+    match mode() {
+        GlassMode::Off => {
+            BLUR_ACTIVE.store(false, Ordering::Relaxed);
+            CURRENT.store(0, Ordering::Relaxed);
+            log::info!("窗口效果: 按设置关闭系统模糊（使用不透明底）");
+            return BlurKind::None;
+        }
+        GlassMode::Acrylic => return finish(if try_acrylic(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, 0x99_14_14_12) {
+            BlurKind::Acrylic
+        } else {
+            BlurKind::None
+        }),
+        GlassMode::Backdrop => return finish(if try_backdrop(hwnd) { BlurKind::Backdrop } else { BlurKind::None }),
+        GlassMode::Auto => {}
+    }
     // 1) 亚克力（观感最好，Win10 1803+ / Win11）——底色偏暗蓝，配合界面的深黑玻璃
     if try_acrylic(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, 0x99_14_14_12) {
-        log::info!("窗口效果: 亚克力模糊已启用");
-        BLUR_ACTIVE.store(true, Ordering::Relaxed);
-        return BlurKind::Acrylic;
+        return finish(BlurKind::Acrylic);
     }
     // 2) Win11 系统背板（含圆角）
     if try_backdrop(hwnd) {
-        log::info!("窗口效果: Win11 系统背板(亚克力)+圆角已启用");
-        BLUR_ACTIVE.store(true, Ordering::Relaxed);
-        return BlurKind::Backdrop;
+        return finish(BlurKind::Backdrop);
     }
     // 3) Aero 模糊（老系统兜底）
     if try_acrylic(hwnd, ACCENT_ENABLE_BLURBEHIND, 0) {
-        log::info!("窗口效果: Aero 模糊已启用（老系统兜底）");
-        BLUR_ACTIVE.store(true, Ordering::Relaxed);
-        return BlurKind::Aero;
+        return finish(BlurKind::Aero);
     }
-    log::warn!("窗口效果: 系统模糊不可用（Win7 无合成或调用被拒绝），界面改用不透明底");
-    BlurKind::None
+    finish(BlurKind::None)
+}
+
+/// 统一收尾：记录状态并写日志
+fn finish(kind: BlurKind) -> BlurKind {
+    let code = match kind {
+        BlurKind::None => 0,
+        BlurKind::Acrylic => 1,
+        BlurKind::Backdrop => 2,
+        BlurKind::Aero => 3,
+    };
+    CURRENT.store(code, Ordering::Relaxed);
+    let active = !matches!(kind, BlurKind::None);
+    BLUR_ACTIVE.store(active, Ordering::Relaxed);
+    match kind {
+        BlurKind::None => log::warn!("窗口效果: 系统模糊不可用（或已关闭），界面改用不透明底"),
+        BlurKind::Acrylic => log::info!("窗口效果: 亚克力模糊已启用"),
+        BlurKind::Backdrop => log::info!("窗口效果: Win11 系统背板(亚克力)+圆角已启用"),
+        BlurKind::Aero => log::info!("窗口效果: Aero 模糊已启用（老系统兜底）"),
+    }
+    kind
+}
+
+/// 当前实际生效的方式（`None` = 没有模糊）
+pub fn current() -> Option<BlurKind> {
+    match CURRENT.load(Ordering::Relaxed) {
+        1 => Some(BlurKind::Acrylic),
+        2 => Some(BlurKind::Backdrop),
+        3 => Some(BlurKind::Aero),
+        _ => None,
+    }
+}
+
+/// 立即重试（切换模式后调用）：有缓存句柄就直接重应用
+pub fn reapply() -> Option<BlurKind> {
+    let h = HWND_CACHE.load(Ordering::Relaxed);
+    if h == 0 {
+        return None;
+    }
+    Some(apply(HWND(h as *mut c_void)))
 }
 
 /// 每帧调用：窗口就绪后应用一次；返回 `Some(结果)` 表示这一次刚完成尝试。
@@ -218,8 +305,9 @@ pub fn apply_once() -> Option<BlurKind> {
 /// 诊断用：把当前状态写成一行（`--diag` 时由设置进程记录）
 pub fn status_line() -> String {
     format!(
-        "系统模糊={} 已尝试={}",
-        if blur_active() { "生效" } else { "不可用" },
+        "系统模糊={:?} 模式={:?} 已尝试={}",
+        current(),
+        mode(),
         APPLIED.load(Ordering::Relaxed)
     )
 }
