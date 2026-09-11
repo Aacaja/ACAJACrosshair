@@ -135,14 +135,19 @@ src/
   (rebuilt on size/theme/translucency change, debounced) instead of ~230 shapes per frame; panel shadows went 12 → 6 layers.
 - The System section shows the **glass status** (acrylic / Win11 backdrop / Aero / opaque fallback) so you don't need logs.
 
-### Next UI work (pending your direction)
+### Next UI work (pending your on-device feedback)
 
-1. **On-device feedback**: glass intensity (transparency alpha), highlight/parallax strength, animation timings — all one-line tunables.
-2. If system blur is unavailable on your machine: alternative "capture the desktop behind the window and blur it ourselves".
-3. **Optional WebView2 web-UI PoC** (feasibility notes in WORKLOG): CSS `backdrop-filter`, blend modes and easing control far
-   exceed what egui offers; the cost is a WebView2 runtime dependency, a full UI rewrite, and it still needs the OS blur for
-   real desktop frost.
-4. Continued polish: scroll inertia, section-switch motion, slider drag physics, repaint cost while dragging the window.
+**Shipped tunables (v1.2.3)**: System section → glass mode (Auto / Acrylic / Win11 backdrop / Off) and glass
+intensity (0.30–1.00, higher = more transparent). Tell me the combination that looks best on your machine and I'll
+make it the default.
+
+**Backlog, by value**:
+1. Keep tuning from your verdict: glass density/tint (currently deep black-grey + neon violet / Klein blue),
+   highlight and parallax strength, card layering contrast.
+2. Motion: scroll inertia, section-switch travel, slider-drag physics, repaint cost while dragging the window.
+3. Text & density: CJK/Latin letter-spacing and line-height, information density re-balance.
+4. Consistency audit across both modes (translucent vs opaque fallback): readability, disabled/hover/focus states.
+5. (Optional branch) WebView2 web-UI PoC — assessed and documented in `AGENTS.md` §6; start it only if you want it.
 
 ### Iteration 1 (v1.2.0) — shipped
 
