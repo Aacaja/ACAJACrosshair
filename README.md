@@ -138,7 +138,23 @@ src/
   with specular rim highlights, concentric radii, hover lift, spring transitions, refined dark/light palettes; on Windows 11
   the window additionally gets system rounded corners + acrylic backdrop (graceful fallback — the UI is self-contained).
 
-### Iteration 2 (v1.2.1) — next up
+### Iteration 1.5 (v1.2.1) — visual revision, shipped
+
+- **Palette**: deep black-grey base (`#08080A` / `#101014` / `#060608`) with low-saturation neon violet `#6C5CE7`
+  and Klein blue `#002FA7` (a violet→Klein hue flow shows through every card); text `#F4F5F8` / `#A7ABB8` / `#71747F`.
+- **Layout**: generous whitespace + an **asymmetric two-column grid** (hero card spans both columns, 0.58 column ratio),
+  200 px glass sidebar rail.
+- **Glassmorphism**: panels are built from 30+ layers — 12-layer soft outer shadow, 15% glass fill, hue-flow band,
+  56 px top gloss, 1 px specular rim (bright top / dark bottom), hover violet bloom; inset controls (inputs, slider
+  tracks, colour wells) get their own inner shadow + bottom thickness highlight.
+- **Typography**: three same-source fonts (Noto Sans SC regular/bold + Noto Serif SC semibold, 8206 glyphs each,
+  identical metrics) — serif headings, bold numerals, sans body; no baseline jumping in mixed CJK/Latin lines.
+- **Motion**: hover transitions colour, stroke and lift together (no popping); cards fade+rise 260 ms on entry
+  (staggered, played once); section switches cross-fade; idle frames don't repaint.
+
+> Backend check: the ~9.5 MB of new font assets ship only in the settings process — `acaja.exe` stays at **3.04 MB**.
+
+### Iteration 2 (v1.2.2) — next up
 - Per-shot **recoil curve** (burst stacking, per-shot delta, cap, recovery rate) with a visual preview of the expansion;
 - independent fire sources (left mouse button / gamepad RT);
 - muzzle/hit flash indicator and an alternative recovery-bar style.
