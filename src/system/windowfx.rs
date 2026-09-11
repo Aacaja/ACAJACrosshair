@@ -64,9 +64,22 @@ struct WindowCompositionAttributeData {
     size_of_data: usize,
 }
 
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn SetWindowCompositionAttribute(hwnd: HWND, data: *mut WindowCompositionAttributeData) -> BOOL;
+/// `SetWindowCompositionAttribute` 的函数指针类型
+type SetWca = unsafe extern "system" fn(hwnd: HWND, data: *mut WindowCompositionAttributeData) -> BOOL;
+
+/// 运行时解析 `SetWindowCompositionAttribute`。
+///
+/// 它是 user32.dll 的**未公开导出**：Windows SDK 的 `user32.lib` 里没有这个符号，
+/// 若用 `#[link(name = "user32")] extern "system" { ... }` 静态声明，链接期会报
+/// `LNK2019: unresolved external symbol __imp_SetWindowCompositionAttribute`（CI 实测踩到），
+/// 因此只能运行时 `GetProcAddress` 取地址（这也是业界通行做法）。
+fn resolve_set_wca() -> Option<SetWca> {
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    unsafe {
+        let user32 = GetModuleHandleW(windows::core::w!("user32.dll")).ok()?;
+        let proc = GetProcAddress(user32, windows::core::s!("SetWindowCompositionAttribute"))?;
+        Some(std::mem::transmute(proc))
+    }
 }
 
 /// 实际生效的模糊方式（写日志用）
@@ -121,6 +134,10 @@ fn own_window() -> Option<HWND> {
 
 /// 亚克力模糊（主路径）：`SetWindowCompositionAttribute` + ABGR 底色
 fn try_acrylic(hwnd: HWND, state: i32, tint_abgr: u32) -> bool {
+    let Some(set_wca) = resolve_set_wca() else {
+        log::warn!("user32!SetWindowCompositionAttribute 不存在（系统过旧？）");
+        return false;
+    };
     let mut policy = AccentPolicy {
         accent_state: state,
         accent_flags: 0,
@@ -132,7 +149,7 @@ fn try_acrylic(hwnd: HWND, state: i32, tint_abgr: u32) -> bool {
         data: &mut policy as *mut AccentPolicy as *mut c_void,
         size_of_data: std::mem::size_of::<AccentPolicy>(),
     };
-    unsafe { SetWindowCompositionAttribute(hwnd, &mut data).as_bool() }
+    unsafe { set_wca(hwnd, &mut data).as_bool() }
 }
 
 /// Win11 背板 + 圆角；**必须同时把玻璃延伸到客户区**，否则无边框窗口看不到效果
