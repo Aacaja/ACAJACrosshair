@@ -36,6 +36,10 @@ jobs:
       # v1.3 重构预览：单独构建，避免默认后端构建拉入 GPUI。
       # 首次冷构建会明显变慢；swatinem/rust-cache 会缓存依赖。
       - name: Build GPUI preview
+        # gpui-pre 自带 Windows manifest（DPI/ComCtl32）；ACAJA 的 winres manifest 不能再叠，
+        # 否则链接期 CVT1100 duplicate MANIFEST。预览二进制不需要 ACAJA 图标/版本资源。
+        env:
+          ACAJA_SKIP_WINRES: "1"
         run: cargo build --release --bin acaja-ui-gpui --features gpui-ui
 
       - name: Run tests

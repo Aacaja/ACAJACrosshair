@@ -8,6 +8,12 @@ fn main() {
     }
     // 交叉类型检查（无 Windows 资源编译器的主机上跑 `cargo check --target *-pc-windows-msvc`）：
     // 设 ACAJA_SKIP_WINRES=1 跳过图标/版本资源嵌入，只为拿到编译期的类型校验。
+    //
+    // v1.3：GPUI 预览二进制由 `gpui-pre` 自带 Windows manifest；如果再叠加本脚本的
+    // manifest，链接期会报 CVT1100 duplicate resource (MANIFEST)。CI 因此只在
+    // `acaja-ui-gpui` 这一步设置该变量。必须声明 rerun-if-env-changed，否则 Cargo
+    // 不会因为同一 target dir 上一步已经跑过 build script 而重新执行。
+    println!("cargo:rerun-if-env-changed=ACAJA_SKIP_WINRES");
     if std::env::var_os("ACAJA_SKIP_WINRES").is_some() {
         println!("cargo:warning=ACAJA_SKIP_WINRES: 跳过 winres 资源嵌入（仅类型检查）");
         return;
