@@ -28,7 +28,13 @@
   CI 用最新 stable，最终以 CI 日志为准。
 
 验证：本地 `cargo check --target x86_64-pc-windows-msvc --features gpui-ui --bin acaja-ui-gpui` 通过；
-CI 结果待本轮 push 后确认。
+CI run [`39392911066`](https://github.com/Aacaja/ACAJACrosshair/actions/runs/39392911066) success（12m56s，59 单测全过）。
+产物：`acaja.exe` 3.1MB / `acaja-ui.exe` 16MB / `acaja-ui-gpui.exe` 31MB / zip 23MB；
+artifact `ACAJA-windows-x64` 已包含 `acaja-ui-gpui.exe`。
+
+踩坑：`gpui-pre` 自带 Windows manifest（DPI/ComCtl32），与 `build.rs` 的 winres manifest 叠加会
+`CVT1100 duplicate resource (MANIFEST)`。CI 的 GPUI 步骤设 `ACAJA_SKIP_WINRES=1` 跳过 ACAJA 资源；
+预览 exe 暂无 ACAJA 图标/版本资源，正式切换为默认 UI 时再处理（或关闭 gpui 的 windows-manifest feature）。
 
 ---
 
