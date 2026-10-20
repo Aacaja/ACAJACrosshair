@@ -270,6 +270,8 @@ struct SettingsApp {
     status: SharedString,
     glass: GpuiGlass,
     last_push: Instant,
+    /// 关闭窗口时是否保存（「关闭」按钮会先置 false，标题栏 X 保持 true）
+    save_on_drop: bool,
 
     size_slider: Entity<SliderState>,
     thickness_slider: Entity<SliderState>,
@@ -367,6 +369,7 @@ impl SettingsApp {
             status: status.into(),
             glass,
             last_push: Instant::now() - Duration::from_secs(1),
+            save_on_drop: true,
             size_slider,
             thickness_slider,
             opacity_slider,
@@ -375,6 +378,7 @@ impl SettingsApp {
     }
 
     fn mark_dirty(&mut self, cx: &mut Context<Self>) {
+        self.save_on_drop = true;
         self.status = t(self.lang, "backend_dirty").into();
         self.live_push(cx);
     }
@@ -457,7 +461,11 @@ impl SettingsApp {
 
 impl Drop for SettingsApp {
     fn drop(&mut self) {
-        // 与旧设置进程一致：关窗即保存工作副本（用户点「应用」只是额外推送）。
+        // 与旧设置进程一致：标题栏 X 关窗即保存工作副本；
+        // 底部「关闭」按钮会先置 save_on_drop=false，实现真正的“不保存退出”。
+        if !self.save_on_drop {
+            return;
+        }
         let mut store = self.store.lock();
         let _ = store.save_preset(&self.preset_name, &self.draft);
         let _ = store.save_app();
@@ -1235,6 +1243,10 @@ impl SettingsApp {
 
     fn render_bottom_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let connected = crate::ipc::find_backend().is_some();
+        let close_label = match self.lang {
+            Lang::Zh => "关闭",
+            Lang::En => "Close",
+        };
         h_flex()
             .h(px(64.))
             .px(px(28.))
@@ -1268,8 +1280,11 @@ impl SettingsApp {
                     .child(
                         Button::new("close")
                             .ghost()
-                            .label(t(self.lang, "cancel"))
-                            .on_click(|_, window, _| window.remove_window()),
+                            .label(close_label)
+                            .on_click(cx.listener(|this, _, window, _| {
+                                this.save_on_drop = false;
+                                window.remove_window();
+                            })),
                     )
                     .child(
                         Button::new("apply")
