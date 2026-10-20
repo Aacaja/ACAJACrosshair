@@ -6,6 +6,32 @@
 
 ---
 
+## [2026-10-20] v1.3 preview（分支 `refactor/gpui-ui`）：GPUI Kit 设置界面
+
+状态：🚧 **预览分支，未合并 main、未发版**。目标是在 Windows 实机上先看新 UI 的观感与材质。
+
+干到哪了：
+- 新增独立二进制 `acaja-ui-gpui.exe`（`src/bin/ui_gpui.rs` + `src/ui_gpui/mod.rs`）；
+  只有 Windows + `gpui-ui` feature 才编译，旧 `acaja-ui.exe` 和后端 `acaja.exe` 默认构建**完全不拉 GPUI**。
+- 无边框 GPUI 窗口 + `TitleBar` 自绘标题栏 + 200px 侧栏 + 底部操作条；
+  Style 分区：自绘准星预览（复用 `overlay::shapes`）、22 形状缩略图、主色、大小/粗细/透明度滑杆、多色/描边开关。
+  System 分区：运行时切换 `WindowBackgroundAppearance`（Acrylic / Mica / Transparent / Opaque）。
+- 材质取舍：窗口级真模糊 + **~86% 不透明**深色表面（旧版整窗 35% 透明太极端），优先可读性与高级感；
+  面板内部仍用半透明填充、1px 镜面边和分层色块伪造玻璃。GPUI 目前没有逐元素 backdrop blur（gpui-kit#3598）。
+- 复用现有 `Preset` / `PresetStore` / `WM_COPYDATA`；滑杆拖动 120ms 节流实时推送，「应用」落盘并推送，关窗自动保存。
+- CI 增加 `cargo build --release --bin acaja-ui-gpui --features gpui-ui`，并把 `acaja-ui-gpui.exe` 打进 artifact/zip。
+
+已知边界：
+- 其余 6 个分区为占位（Dynamic/Position/Gamepad/Hotkey/Image/Presets），后续逐项迁移。
+- 四象限配色编辑器未做；多色开关会沿用现有预设的四色。
+- GPUI 0.8.0 精确 pin `gpui-pre 0.3.9`；本机 Rust 1.92 对其中几个新稳定 API 需要本地 bootstrap 补丁，
+  CI 用最新 stable，最终以 CI 日志为准。
+
+验证：本地 `cargo check --target x86_64-pc-windows-msvc --features gpui-ui --bin acaja-ui-gpui` 通过；
+CI 结果待本轮 push 后确认。
+
+---
+
 ## [2026-09-11] v1.2.3：毛玻璃可调（模式 + 强度）—— 把「只有真机能看到的效果」交给用户定
 
 总目标：用户确认系统为 **Windows 11**；并对网页界面给出结论：**暂时不实装**，仅在咨询可行性，

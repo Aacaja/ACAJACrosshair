@@ -23,6 +23,11 @@ pub mod state;
 pub mod system;
 pub mod ui;
 
+/// v1.3 设置界面重构预览（GPUI Kit）。只在 Windows + `gpui-ui` feature 下编译；
+/// 后端 `acaja.exe` 的默认构建完全不会拉入 GPUI。
+#[cfg(all(windows, feature = "gpui-ui"))]
+pub mod ui_gpui;
+
 /// 品牌名（英文）
 pub const APP_NAME: &str = "ACAJA";
 /// 品牌名（中文展示）

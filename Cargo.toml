@@ -6,6 +6,12 @@ path = "src/bin/backend.rs"
 name = "acaja-ui"
 path = "src/bin/ui.rs"
 
+# v1.3 GPUI 重构预览（仅 Windows；`cargo build --bin acaja-ui-gpui --features gpui-ui`）
+[[bin]]
+name = "acaja-ui-gpui"
+path = "src/bin/ui_gpui.rs"
+required-features = ["gpui-ui"]
+
 [package]
 name = "acaja"
 version = "1.2.3"
@@ -15,6 +21,12 @@ authors = ["Aacaja"]
 license = "MIT"
 repository = "https://github.com/liuroland55/CrossHairLIN"
 build = "build.rs"
+
+[features]
+# 默认不拉 GPUI：后端/旧设置界面构建保持轻量；
+# 预览构建显式 `--features gpui-ui`，后续重构完成后再考虑默认启用。
+default = []
+gpui-ui = ["dep:gpui-kit"]
 
 [dependencies]
 # Windows API (Win32) —— 特性按命名空间裁剪，只编译用到的部分
@@ -66,6 +78,10 @@ simplelog = "0.12"
 
 # 原生文件对话框（自定义图片选择、预设导入/导出）
 rfd = "0.17"
+
+# 设置界面重构（v1.3 预览）：GPUI Kit 固定精确版本——
+# 它 pin 了对应的 gpui-pre 快照，0.x 期间 API 会变；升级必须显式改版本并跑 CI。
+gpui-kit = { version = "=0.8.0", optional = true }
 
 [build-dependencies]
 winres = "0.1"

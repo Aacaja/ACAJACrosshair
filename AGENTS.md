@@ -17,6 +17,7 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
 |---|---|---|
 | 后台壳进程 | `src/bin/backend.rs` | 单实例互斥体 → 消息窗口 → 托盘/热键/RawInput/前台钩子/手柄 → 事件驱动主循环（`MsgWaitForMultipleObjectsEx`，空闲完全睡眠）|
 | 设置进程 | `src/bin/ui.rs` + `src/ui/*` | egui 窗口；每 2s `FindWindow("ACAJABackend")` 自检，主进程没了就退出；关闭窗口 = 本进程退出 |
+| GPUI 预览（v1.3 分支） | `src/bin/ui_gpui.rs` + `src/ui_gpui/*` | 仅 Windows + `gpui-ui` feature；独立 `acaja-ui-gpui.exe`，不替换旧设置界面；默认构建不拉 GPUI |
 | 进程间通信 | `src/ipc.rs` | WM_COPYDATA 同步推送（`{"v":visible,"p":<preset json>}`）；UI 另有「写文件 → 主进程 mtime 监控」兜底通道 |
 | 覆盖层渲染 | `src/overlay/mod.rs`（D2D 小窗口 + `UpdateLayeredWindow`）、`src/overlay/shapes.rs`（22 形状纯几何，可单测） | 独立渲染线程；空闲阻塞在 channel 上（≈0% CPU）；动态扩散动画在本线程衰减 |
 | 配置 | `src/config.rs` | `PresetStore`（每预设一个 JSON，原子写）、`AppConfig`（app.json）、旧版 CrosshairApp 迁移、热键字符串解析 |
@@ -52,6 +53,17 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
    - 解析 `gh run view --log` 的坑：转义符会被写成**字面量 `^[`**（不是 ESC 字节），直接正则匹配 `-->` 会失败，
      先 `text.replace("^[", "\x1b")` 再去 ANSI；筛告警要用 `grep ': warning'`（`--message-format short`
      输出格式是 `文件:行:列: warning: …`，用 `^warning` 会全部漏掉）。
+   - **GPUI 预览（v1.3 分支）**：`gpui-kit 0.8.0` 精确 pin `gpui-pre 0.3.9`，其中用到
+     `slice::as_array` / `std::hint::cold_path` / `AtomicU64::try_update`——本机 1.92.0 还标为 unstable，
+     CI 的最新 stable 已经可用。macOS 交叉检查还需要一个 `llvm-rc` 桩（`gpui-pre` 的 Windows manifest 构建脚本）：
+     ```sh
+     # /tmp/acaja-tools/llvm-rc: #!/bin/sh + exit 0
+     T=~/.rustup/toolchains/stable-aarch64-apple-darwin
+     PATH=/tmp/acaja-tools:$PATH RUSTC_BOOTSTRAP=1 RUSTC=$T/bin/rustc ACAJA_SKIP_WINRES=1 \
+       "$T/bin/cargo" check --target x86_64-pc-windows-msvc --features gpui-ui \
+       --bin acaja-ui-gpui --message-format short
+     ```
+     `RUSTC_BOOTSTRAP=1` 只是本机绕过；**不要把 feature gate 补丁提交进仓库**。
 3. 不要提交 `Cargo.lock`（已在 `.gitignore`）。
 4. 用户的实机反馈是**最高优先级证据**；没有实机证据时，结论要标注为推断。
 
