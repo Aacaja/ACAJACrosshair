@@ -1,18 +1,18 @@
 # ACAJA — Crosshair Overlay for Windows
 
-> **Current version v1.2.3**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
+> **Current version v1.3.0**: full feature set (settings UI / tray / hotkey / gamepad ADS / per-game auto profiles).
 > Maintainers: see [AGENTS.md](AGENTS.md) (architecture map, how to verify, known pitfalls) and [WORKLOG.md](WORKLOG.md) (change log).
 
-ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` + Direct2D + egui) — a complete rewrite of [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN) (Python/PySide6). Click-through, zero runtime dependencies.
+ACAJA is a Windows desktop crosshair overlay written in **Rust** (`windows-rs` + Direct2D + GPUI Kit) — a complete rewrite of [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN) (Python/PySide6). Click-through, zero runtime dependencies.
 
-**Key improvements over the Python version**: ~8 MB exe (was 46 MB), event-driven crosshair-sized overlay (≈0% CPU idle), Direct2D GPU rendering, **22 shapes** with quad-color support, modern egui settings window, gamepad ADS support, per-game auto presets.
+**Key improvements over the Python version**: backend ~3 MB + settings UI ~31 MB, both on demand (was a 46 MB monolith), event-driven crosshair-sized overlay (≈0% CPU idle), Direct2D GPU rendering, **22 shapes** with quad-color support, modern GPUI Kit settings window, gamepad ADS support, per-game auto presets.
 
 ---
 
 # 📖 User Guide
 
 ## 1. Download & Run
-1. Grab `ACAJA-v1.2.3-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
+1. Grab `ACAJA-v1.3.0-x64.zip` from [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) (or the latest Actions artifact).
 2. Unzip and run `acaja.exe`. You get: the **settings window** (dark UI), a **red cross** at screen center (default), and a **tray icon**.
 3. Closing the settings window keeps the app running — the crosshair stays, tray controls everything.
 
@@ -31,7 +31,7 @@ The settings window has a left-hand section nav, content cards on the right, and
 | **Hotkeys** | Toggle hotkey, **next-preset hotkey**, right-click modes |
 | **Image** | Custom PNG path + scale (select the Custom Image shape first) |
 | **Presets** | Save / create (clone) / delete / switch presets, plus the **game-binding editor** (foreground app → preset) |
-| **System** | Start with Windows (per-user registry Run key) |
+| **System** | Start with Windows (per-user registry Run key), window material (Acrylic / Mica / Transparent / Opaque), glass strength, quit backend |
 
 Workflow: tweak → **Apply to main program** (or just close the window — it saves automatically).
 
@@ -83,7 +83,7 @@ Backend shell (acaja.exe, ~15 MB resident, no UI framework)
 └── gamepad thread : XInput polling (125 Hz)
 
 Settings process (acaja-ui.exe, launched on demand, fully released on close)
-└── egui window; parameters pushed live to the backend via WM_COPYDATA
+└── GPUI Kit window; parameters pushed live to the backend via WM_COPYDATA
 ```
 
 ```
@@ -95,14 +95,14 @@ src/
 ├── overlay/        # D2D renderer (22 shapes, quad colors, outline, rotation, spread, images)
 ├── input/          # XInput gamepad + RawInput mouse
 ├── system/         # tray / hotkey / foreground detect / monitors / autostart
-├── ui/             # egui settings window (preview, i18n, themes, presets, bindings)
+├── ui/             # GPUI Kit settings window (preview, i18n, presets, bindings)
 └── state.rs        # ADS state machine, preset cycling, position resolution
 ```
 
 ## Requirements
 - Windows 10 / 11 (x64). No runtime dependencies.
 
-## Roadmap (current phase: **heavy UI development**)
+## Roadmap (current phase: **maintenance + UI polish**)
 
 > Design law: **the backend `acaja.exe` stays absolutely clean and lightweight** — no UI framework, no extra threads/polling,
 > no system-wide hooks, no new dependencies. Heavy lifting lives only in the settings process `acaja-ui.exe` (launched on
@@ -115,7 +115,8 @@ src/
 |---|---|---|---|
 | 1 | v1.2.0 | Profile & editing workflow (presets / hotkey recording / monitors / image picker / template gallery / live sync) | ✅ released |
 | 1.5 | v1.2.1 | Visual revision: deep black-grey glassmorphism + serif/sans pairing + silky motion | ✅ released |
-| 1.6 | **v1.2.2** | **Real frosted glass**: system acrylic + genuinely translucent base + mouse specular/parallax/edge refraction + eased motion + backdrop pre-bake | ✅ this round |
+| 1.6 | v1.2.2 | **Real frosted glass**: system acrylic + genuinely translucent base + mouse specular/parallax/edge refraction + eased motion + backdrop pre-bake | ✅ released |
+| 2.0 | **v1.3.0** | **GPUI Kit settings UI**: full feature migration, hardware-accelerated rendering, Acrylic / Mica / Transparent / Opaque materials | ✅ released |
 | ~~2–4~~ | — | ~~dynamic crosshair / multi-monitor / usability polish~~ | ❌ cancelled by the user |
 
 ### Stage 1.6 (v1.2.2) — shipped
@@ -135,19 +136,16 @@ src/
   (rebuilt on size/theme/translucency change, debounced) instead of ~230 shapes per frame; panel shadows went 12 → 6 layers.
 - The System section shows the **glass status** (acrylic / Win11 backdrop / Aero / opaque fallback) so you don't need logs.
 
-### Next UI work (pending your on-device feedback)
+### Post-v1.3.0 (pending your on-device feedback)
 
-**Shipped tunables (v1.2.3)**: System section → glass mode (Auto / Acrylic / Win11 backdrop / Off) and glass
-intensity (0.30–1.00, higher = more transparent). Tell me the combination that looks best on your machine and I'll
-make it the default.
+**v1.3.0 shipped**: the settings UI is now GPUI Kit (hardware-accelerated, dark-first). System → window material
+(Acrylic / Mica / Transparent / Opaque) and surface strength; the old egui UI and its dependency stack are removed.
 
 **Backlog, by value**:
-1. Keep tuning from your verdict: glass density/tint (currently deep black-grey + neon violet / Klein blue),
-   highlight and parallax strength, card layering contrast.
-2. Motion: scroll inertia, section-switch travel, slider-drag physics, repaint cost while dragging the window.
-3. Text & density: CJK/Latin letter-spacing and line-height, information density re-balance.
-4. Consistency audit across both modes (translucent vs opaque fallback): readability, disabled/hover/focus states.
-5. (Optional branch) WebView2 web-UI PoC — assessed and documented in `AGENTS.md` §6; start it only if you want it.
+1. Your verdict on the new GPUI UI: material choice, surface strength, density, typography.
+2. Remaining polish: scroll inertia, slider-drag feel, focus/disabled states, titlebar hit areas.
+3. Optional: light theme (the v1.3 UI is dark-first by design).
+4. (Optional branch) WebView2 web-UI PoC — assessed and documented in `AGENTS.md` §6; start it only if you want it.
 
 ### Iteration 1 (v1.2.0) — shipped
 

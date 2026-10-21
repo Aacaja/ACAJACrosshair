@@ -30,20 +30,23 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (release)
-        run: cargo build --release
-
-      # v1.3 重构预览：单独构建，避免默认后端构建拉入 GPUI。
-      # 首次冷构建会明显变慢；swatinem/rust-cache 会缓存依赖。
-      - name: Build GPUI preview
-        # gpui-pre 自带 Windows manifest（DPI/ComCtl32）；ACAJA 的 winres manifest 不能再叠，
-        # 否则链接期 CVT1100 duplicate MANIFEST。预览二进制不需要 ACAJA 图标/版本资源。
-        env:
-          ACAJA_SKIP_WINRES: "1"
-        run: cargo build --release --bin acaja-ui-gpui --features gpui-ui
-
+      # 先跑测试：测试目标也会链接 GPUI，设置 ACAJA_SKIP_MANIFEST 避免重复 manifest。
       - name: Run tests
-        run: cargo test --release
+        env:
+          ACAJA_SKIP_MANIFEST: "1"
+        run: cargo test --release --features gpui-ui
+
+      # 测试后再构建最终产物，确保 acaja.exe 带完整 ACAJA manifest（图标/DPI/版本）。
+      - name: Build backend
+        run: cargo build --release --bin acaja
+
+      # 设置界面 = GPUI Kit。gpui-pre 自带 Windows manifest（DPI/ComCtl32），
+      # ACAJA 的 winres manifest 不能再叠（CVT1100 duplicate MANIFEST）；
+      # ACAJA_SKIP_MANIFEST 保留图标/版本资源，只跳过 manifest。
+      - name: Build settings UI (GPUI)
+        env:
+          ACAJA_SKIP_MANIFEST: "1"
+        run: cargo build --release --bin acaja-ui --features gpui-ui
 
       - name: Package
         shell: pwsh
@@ -54,9 +57,6 @@ jobs:
           # 保持程序内部搜索名一致（acaja.exe / acaja-ui.exe），版本号进 zip 名
           Copy-Item target\release\acaja.exe "dist\acaja.exe" -ErrorAction Stop
           Copy-Item target\release\acaja-ui.exe "dist\acaja-ui.exe" -ErrorAction Stop
-          if (Test-Path target\release\acaja-ui-gpui.exe) {
-            Copy-Item target\release\acaja-ui-gpui.exe "dist\acaja-ui-gpui.exe" -ErrorAction Stop
-          }
           Compress-Archive -Path dist\* -DestinationPath "dist\ACAJA-v$version-x64.zip" -Force
           Copy-Item README.md, README_CN.md -Destination dist -ErrorAction SilentlyContinue
           Get-ChildItem dist

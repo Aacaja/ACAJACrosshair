@@ -19,6 +19,12 @@ fn main() {
         return;
     }
 
+    // GPUI 的 gpui-pre 自带 Windows manifest（DPI/ComCtl32）。链接时不能再叠加
+    // 本脚本的 manifest，否则 CVT1100 duplicate resource。设置该变量时保留
+    // 图标/版本信息，只跳过 manifest。
+    println!("cargo:rerun-if-env-changed=ACAJA_SKIP_MANIFEST");
+    let skip_manifest = std::env::var_os("ACAJA_SKIP_MANIFEST").is_some();
+
     // ---- 旧版图标沿用（品牌替换时直接换 assets 下文件即可）----
     let mut res = winres::WindowsResource::new();
     res.set_icon("assets/icons/ACAJA.ico");
@@ -35,8 +41,10 @@ fn main() {
     res.set("ProductVersion", &file_version);
 
     // ---- Per-Monitor DPI manifest + Win10/11 兼容声明 ----
-    res.set_manifest(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    // GPUI 构建时由 gpui-pre 提供 manifest；这里只保留图标/版本资源。
+    if !skip_manifest {
+        res.set_manifest(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
@@ -58,7 +66,8 @@ fn main() {
     </windowsSettings>
   </application>
 </assembly>"#,
-    );
+        );
+    }
 
     res.compile().expect("winres: embed icon/version/manifest failed");
 }

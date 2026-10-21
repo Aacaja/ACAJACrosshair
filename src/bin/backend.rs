@@ -2,7 +2,7 @@
 //!
 //! - 默认启动 = **后台壳进程**：D2D 准星 + 输入 + 托盘，内存 ~15MB；
 //!   设置界面按需以独立进程 `acaja.exe --ui` 拉起，修改参数经 WM_COPYDATA 实时同步。
-//! - `--ui` 参数 = **设置 UI 进程**：egui 界面；关闭即释放全部界面资源（~65MB）；
+//! - `--ui` 参数 = **设置 UI 进程**：GPUI 界面；关闭即释放全部界面资源；
 //!   每 2s 自检主进程窗口，主进程退出时自动退出。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -34,7 +34,7 @@ use acaja::state::{AppState, SharedPreset, apply_ads_event, next_preset, snap_po
 use acaja::system::foreground::{FgEvent, start_fg_watcher};
 use acaja::system::hotkey::{HOTKEY_ID_NEXT_PRESET, HOTKEY_ID_TOGGLE, register as reg_hotkey, unregister as unreg_hotkey};
 use acaja::system::tray::{self, CMD_QUIT, CMD_SETTINGS, CMD_TOGGLE, Tray, WM_TRAYICON};
-use acaja::ui::strings::t;
+use acaja::strings::t;
 use acaja::{APP_NAME, VERSION};
 
 const MAIN_CLASS: PCWSTR = w!("ACAJAMainWindow");

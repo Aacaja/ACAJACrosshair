@@ -2,17 +2,18 @@
 //!
 //! 双进程架构（v1.1.0 起）：
 //! - `acaja.exe`（`src/bin/backend.rs`）= 后台壳：覆盖层 + 托盘 + 热键 + 输入，不链接 UI 框架；
-//! - `acaja-ui.exe`（`src/bin/ui.rs` + `ui`）= 设置进程：egui 窗口，关闭即退出；
+//! - `acaja-ui.exe`（`src/bin/ui.rs` + `ui`）= 设置进程：GPUI 窗口，关闭即退出；
 //!   两者经 `ipc`（WM_COPYDATA）实时同步参数。
 //!
 //! 模块：
 //! - `config`   配置中心（预设、原子持久化、旧版迁移、热键解析）
-//! - `i18n`     语言标识（界面文案见 `ui::strings`）
+//! - `i18n`     语言标识
+//! - `strings`  中英文案表（UI / 托盘共用）
 //! - `overlay`  Direct2D 覆盖层渲染（形状几何在 `overlay::shapes`，纯数学、可单测）
 //! - `input`    XInput 手柄 / RawInput 鼠标
 //! - `system`   前台检测、托盘、全局热键、多显示器、开机自启
 //! - `state`    ADS 状态机、预设轮换、位置解析（纯逻辑、可单测）
-//! - `ui`       egui 设置界面（文案表、实时预览、字体）
+//! - `ui`       GPUI Kit 设置界面（仅 Windows + `gpui-ui` feature）
 
 pub mod config;
 pub mod i18n;
@@ -20,13 +21,13 @@ pub mod input;
 pub mod ipc;
 pub mod overlay;
 pub mod state;
+pub mod strings;
 pub mod system;
-pub mod ui;
 
-/// v1.3 设置界面重构预览（GPUI Kit）。只在 Windows + `gpui-ui` feature 下编译；
+/// GPUI Kit 设置界面。只在 Windows + `gpui-ui` feature 下编译；
 /// 后端 `acaja.exe` 的默认构建完全不会拉入 GPUI。
 #[cfg(all(windows, feature = "gpui-ui"))]
-pub mod ui_gpui;
+pub mod ui;
 
 /// 品牌名（英文）
 pub const APP_NAME: &str = "ACAJA";

@@ -1,6 +1,6 @@
 # AGENTS.md — ACAJA 项目导航（新会话/新 Agent 先读本文件）
 
-> 最后更新：2026-09-11（v1.1.7）
+> 最后更新：2026-10-22（v1.3.0）
 > 配套文档：`WORKLOG.md` = 开发日志（每轮的变更 + **验证证据**，决策脉络都在里面）；
 > `README.md` / `README_CN.md` = 用户文档；`DOCS_DEV_PLAN.md` = 早期 S3–S5 并行开发契约（历史资料）。
 
@@ -8,7 +8,7 @@
 
 ## 0. 一句话
 
-ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egui 0.30），
+ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + GPUI Kit 0.8），
 双进程：`acaja.exe` 后台壳（准星/托盘/热键/输入，无 UI 框架）+ `acaja-ui.exe` 设置窗（按需拉起，关闭即退出）。
 
 ## 1. 架构速查
@@ -16,8 +16,8 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
 | 组件 | 文件 | 说明 |
 |---|---|---|
 | 后台壳进程 | `src/bin/backend.rs` | 单实例互斥体 → 消息窗口 → 托盘/热键/RawInput/前台钩子/手柄 → 事件驱动主循环（`MsgWaitForMultipleObjectsEx`，空闲完全睡眠）|
-| 设置进程 | `src/bin/ui.rs` + `src/ui/*` | egui 窗口；每 2s `FindWindow("ACAJABackend")` 自检，主进程没了就退出；关闭窗口 = 本进程退出 |
-| GPUI 预览（v1.3 分支） | `src/bin/ui_gpui.rs` + `src/ui_gpui/*` | 仅 Windows + `gpui-ui` feature；独立 `acaja-ui-gpui.exe`，不替换旧设置界面；默认构建不拉 GPUI |
+| 设置进程 | `src/bin/ui.rs` + `src/ui/*` | GPUI Kit 窗口；每 2s `FindWindow("ACAJABackend")` 自检，主进程没了就退出；关闭窗口 = 本进程退出 |
+| GPUI 设置界面 | `src/bin/ui.rs` + `src/ui/*` | 仅 Windows + `gpui-ui` feature；默认构建不拉 GPUI；`acaja-ui.exe` = GPUI 设置进程 |
 | 进程间通信 | `src/ipc.rs` | WM_COPYDATA 同步推送（`{"v":visible,"p":<preset json>}`）；UI 另有「写文件 → 主进程 mtime 监控」兜底通道 |
 | 覆盖层渲染 | `src/overlay/mod.rs`（D2D 小窗口 + `UpdateLayeredWindow`）、`src/overlay/shapes.rs`（22 形状纯几何，可单测） | 独立渲染线程；空闲阻塞在 channel 上（≈0% CPU）；动态扩散动画在本线程衰减 |
 | 配置 | `src/config.rs` | `PresetStore`（每预设一个 JSON，原子写）、`AppConfig`（app.json）、旧版 CrosshairApp 迁移、热键字符串解析 |
@@ -25,7 +25,7 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
 | 输入 | `src/input/gamepad.rs`（XInput 轮询）、`src/input/raw_mouse.rs`（RawInput 全局左右键） | 手柄线程配置 `Arc<RwLock<RuntimeGamepadCfg>>` 动态生效 |
 | 系统层 | `src/system/{tray,hotkey,foreground,monitor,autostart}.rs` | 托盘 `Shell_NotifyIcon`、`RegisterHotKey`、`SetWinEventHook` 前台检测、多显示器、注册表自启 |
 | 锁工具 | `src/lib.rs` 的 `acaja::sync` | **容忍中毒**的 lock/read/write（见 §4） |
-| UI 文案 | `src/ui/strings.rs` | **唯一**文案表（key, 中文, English），导航 key 清单见 `src/ui/mod.rs::NAV_ITEMS` |
+| UI 文案 | `src/strings.rs` | **唯一**文案表（key, 中文, English），导航 key 清单见 `src/ui/mod.rs::Section::ALL` |
 
 数据目录：`%APPDATA%/ACAJACrosshair/`（`app.json`、`presets/<名>.json`、`acaja-crash.log`、`cmd.json`）。
 
@@ -33,7 +33,8 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
 
 开发机是 macOS，**没有 Windows 运行环境**：GUI 外观与 Win32 行为无法本地实测。
 
-1. **主验证通道 = GitHub Actions**（`.github/workflows/build.yml`，windows-latest：`cargo build --release` + `cargo test --release`）。
+1. **主验证通道 = GitHub Actions**（`.github/workflows/build.yml`，windows-latest：
+   `cargo test --release --features gpui-ui` + 构建 `acaja.exe` / `acaja-ui.exe`）。
    `git push origin main` 即触发，约 4 分钟；`gh run list --limit 3` / `gh run watch <id>` 看结果。
    打 tag `vX.Y.Z` 会额外自动发 Release（资产：acaja.exe / acaja-ui.exe / zip / README）。
 2. **本地类型校验（v1.1.7 起可用）**——改完先跑它，能省一轮 CI：
@@ -53,7 +54,7 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
    - 解析 `gh run view --log` 的坑：转义符会被写成**字面量 `^[`**（不是 ESC 字节），直接正则匹配 `-->` 会失败，
      先 `text.replace("^[", "\x1b")` 再去 ANSI；筛告警要用 `grep ': warning'`（`--message-format short`
      输出格式是 `文件:行:列: warning: …`，用 `^warning` 会全部漏掉）。
-   - **GPUI 预览（v1.3 分支）**：`gpui-kit 0.8.0` 精确 pin `gpui-pre 0.3.9`，其中用到
+   - **GPUI 设置界面（v1.3 起）**：`gpui-kit 0.8.0` 精确 pin `gpui-pre 0.3.9`，其中用到
      `slice::as_array` / `std::hint::cold_path` / `AtomicU64::try_update`——本机 1.92.0 还标为 unstable，
      CI 的最新 stable 已经可用。macOS 交叉检查还需要一个 `llvm-rc` 桩（`gpui-pre` 的 Windows manifest 构建脚本）：
      ```sh
@@ -61,7 +62,7 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
      T=~/.rustup/toolchains/stable-aarch64-apple-darwin
      PATH=/tmp/acaja-tools:$PATH RUSTC_BOOTSTRAP=1 RUSTC=$T/bin/rustc ACAJA_SKIP_WINRES=1 \
        "$T/bin/cargo" check --target x86_64-pc-windows-msvc --features gpui-ui \
-       --bin acaja-ui-gpui --message-format short
+       --bin acaja-ui --message-format short
      ```
      `RUSTC_BOOTSTRAP=1` 只是本机绕过；**不要把 feature gate 补丁提交进仓库**。
 3. 不要提交 `Cargo.lock`（已在 `.gitignore`）。
@@ -94,8 +95,8 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
 
 ## 3. 代码约定
 
-- **文案只有一份表**：`src/ui/strings.rs`（一行 = 一个 key，中英同排，按 key 升序，`binary_search` 查表）。
-  新增文案 = 在表里加一行；新增导航项 = 改 `src/ui/mod.rs::NAV_ITEMS`（单测会校验双语均非空）。
+- **文案只有一份表**：`src/strings.rs`（一行 = 一个 key，中英同排，按 key 升序，`binary_search` 查表）。
+  新增文案 = 在表里加一行；新增导航项 = 改 `src/ui/mod.rs::Section::ALL`（单测会校验双语均非空）。
   历史上 `zh()`/`en()` 两份独立 match 表 + `_ => ""` 兜底导致导航出现**空白项**，不要再回到那种结构。
 - **锁**：一律用 `acaja::sync::{lock, read, write}`，不要写 `.lock().unwrap()`。
   持锁 panic 会让 `Mutex` 永久中毒，`.unwrap()` 会把「一次 panic」放大成「之后每次都 panic」的砖头。
@@ -114,8 +115,13 @@ ACAJA = Windows 准星覆盖工具。**Rust**（windows-rs 0.58 + Direct2D + egu
   `SelectObject(hdc, 原stock位图)` 换出再删（`src/overlay/mod.rs` 的 `create_dib`/`ensure_canvas_size`）。
 - **托盘菜单**：`TrackPopupMenu` 前必须 `SetForegroundWindow`，之后 `PostMessage(WM_NULL)`；
   否则菜单可能收不到输入、点别处不消失（用户看到「卡住」）。且不要在主消息线程弹 `MessageBox`（会卡住托盘/热键）。
-- **egui 0.30**：`painter.hline(x: Rangef, y: f32, stroke)`；`rect.center()` 是 `Pos2`（取 `.y`）；
-  `ComboBox::from_id_salt`。CJK 字体走内置子集 `assets/fonts/ACAJACJK-Regular.otf`（系统 msyh 与 ab_glyph 不兼容，会 panic）。
+- **GPUI Kit 0.8 / gpui-pre 0.3.9**：精确 pin；API 0.x 会变，升级必须显式改版本并跑 CI。
+  `TitleBar::window_options()` 负责无边框标题栏；`Window::set_background_appearance` 运行时切换材质。
+  GPUI 没有逐元素 backdrop blur；玻璃仍靠窗口级材质 + 半透明表面。
+- **Windows manifest**：`gpui-pre` 自带 manifest；构建设置进程时设 `ACAJA_SKIP_MANIFEST=1`
+  （保留 ACAJA 图标/版本，只跳过 manifest），否则链接期 `CVT1100 duplicate resource (MANIFEST)`。
+- **字体**：`assets/fonts/*.ttf` 通过 `TextSystem::add_fonts` 安装；GPUI 的 family 名来自 TTF name 表，
+  当前是 `Noto Sans SC Thin` / `Noto Serif SC ExtraLight`。
 - **XInput**：链接名必须是 `XInput`（SDK 库名）；`XINPUT_GAMEPAD` 16 字节；LB/RB 是 `0x0100/0x0200`（`0x0004/0x0008` 是十字键）。
 - **RawInput**：`RIDEV_INPUTSINK` 才能后台收到；两阶段 `GetRawInputData`；`WM_INPUT` 必须在消息泵里分支消费。
 - **前台检测**：钩子回调由**安装线程**的消息泵驱动，回调里只做轻量工作（开进程查路径即可，别做重活）。
@@ -143,7 +149,7 @@ gh run watch $(gh run list --limit 1 --json databaseId -q '.[0].databaseId')
 
 **关键事实（先破误区）**：CSS `backdrop-filter` **无法采样桌面**（Chromium 视透明窗口背后为空像素，Microsoft/Chromium issue 有记录），
 所以「换网页 = 自动有桌面毛玻璃」是错的 —— 桌面磨砂**只能由系统合成器提供**，也就是我们已经实现的
-`system/windowfx.rs`（亚克力 / Win11 背板 / Aero）那套，**可被网页宿主直接复用**。
+GPUI 的 `WindowBackgroundAppearance`（Acrylic / Mica / Transparent）那套，**可被网页宿主直接复用**。
 
 **推荐的实施形态**（若将来要做）：
 1. **设置进程内嵌 WebView2**（首选）：宿主窗口加系统模糊 + WebView2 背景透明（`put_DefaultBackgroundColor(透明)` /
@@ -154,12 +160,12 @@ gh run watch $(gh run list --limit 1 --json databaseId -q '.[0].databaseId')
 
 **收益**：CSS 表现力（页内模糊/混合模式/SVG 滤镜/任意缓动/字体渲染）、**改样式无需重编译 Rust**（秒级迭代）、可用现成组件库。
 **代价**：WebView2 运行时依赖（Win11 自带；Win10 通常随 Edge 存在，可在检测缺失时提示或内置固定版 ~180MB）、
-设置进程内存 ~100–200MB、界面整体重写（现有 egui 约 3400 行 → HTML/CSS/JS 约 2500–3000 行）、
+设置进程内存 ~100–200MB、界面整体重写（现有 GPUI Rust 代码 → HTML/CSS/JS）、
 无边框拖拽/缩放、DPI、字体嵌入都要重做。
 
 **PoC 范围（约 1 轮，不改默认行为）**：给 `acaja-ui.exe` 加 `--web` 开关 →
 透明 WebView2 + 宿主系统模糊 + 一个真实页面（读取并实时推送当前预设）+ **原生界面保留为回退**
-（WebView2 缺失/初始化失败自动落回 egui）。用户实测对比后再决定是否迁移。
+（WebView2 缺失/初始化失败自动落回 GPUI）。用户实测对比后再决定是否迁移。
 Rust 侧可用 `webview2-com`（微软官方绑定）或 `wry`；仓库已经有 `windows` crate 依赖。
 
 ## 7. 当前边界 / 已知未做

@@ -81,7 +81,9 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("glass_mode_acrylic", "亚克力", "Acrylic"),
     ("glass_mode_auto", "自动", "Auto"),
     ("glass_mode_backdrop", "Win11 背板", "Win11 backdrop"),
+    ("glass_mode_mica", "Mica", "Mica"),
     ("glass_mode_off", "关闭", "Off"),
+    ("glass_mode_transparent", "透明", "Transparent"),
     ("glass_note", "系统模糊生效时窗口用真半透明底（桌面透得进来）；不可用时自动改用不透明底，界面依旧完整", "When system blur is active the window uses a truly translucent base (the desktop shows through); otherwise it falls back to an opaque base and the UI stays complete"),
     ("glass_unavailable", "不可用（已用不透明底兜底）", "Unavailable (opaque fallback)"),
     ("hollow_gap", "中心缺口（空心）", "Gap (hollow)"),
@@ -262,6 +264,8 @@ pub fn glass_mode_name(lang: Lang, mode: GlassMode) -> &'static str {
         GlassMode::Auto => "glass_mode_auto",
         GlassMode::Acrylic => "glass_mode_acrylic",
         GlassMode::Backdrop => "glass_mode_backdrop",
+        GlassMode::Mica => "glass_mode_mica",
+        GlassMode::Transparent => "glass_mode_transparent",
         GlassMode::Off => "glass_mode_off",
     };
     t(lang, key)
@@ -290,7 +294,16 @@ mod tests {
     /// 新增 key 却忘记写进表格 → 界面空白（v1.1.6 导航 bug 的回归测试）
     #[test]
     fn nav_and_system_keys_exist_in_both_langs() {
-        for (_, k) in crate::ui::NAV_ITEMS {
+        for k in [
+            "nav_style",
+            "nav_dynamic",
+            "nav_position",
+            "nav_gamepad",
+            "nav_hotkey",
+            "nav_image",
+            "nav_presets",
+            "nav_system",
+        ] {
             assert!(!t(Lang::Zh, k).is_empty(), "导航 key 缺中文: {k}");
             assert!(!t(Lang::En, k).is_empty(), "导航 key 缺英文: {k}");
         }
@@ -311,7 +324,9 @@ mod tests {
             "glass_mode_acrylic",
             "glass_mode_auto",
             "glass_mode_backdrop",
+            "glass_mode_mica",
             "glass_mode_off",
+            "glass_mode_transparent",
             "glass_note",
             "glass_unavailable",
         ] {

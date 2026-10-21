@@ -6,6 +6,48 @@
 
 ---
 
+## [2026-10-22] v1.3.0：设置界面完整迁移到 GPUI Kit（全功能）
+
+状态：✅ 代码完成（本地类型校验通过；CI/实机验证后发版）。
+
+干到哪了：
+- **默认设置界面切换为 GPUI Kit**：`acaja-ui.exe` 由 `src/bin/ui.rs` + `src/ui/mod.rs` 提供；
+  旧 egui 设置界面、`eframe` / `egui` / `ab_glyph` 依赖、`system/windowfx.rs` 全部移除。
+- **文案表抽到 UI 无关层**：`src/ui/strings.rs` → `src/strings.rs`，后端托盘与 GPUI 设置界面共用一份。
+- **全功能迁移**：
+  - 形状样式：22 形状缩略图、自绘实时预览、8 套模板、主色/四象限、大小/粗细/透明度/旋转、
+    空心缺口/中心点、描边（开关/厚度/颜色/透明度）。
+  - 动态：开火扩散、恢复速度、后坐力指示、扩散形态预览。
+  - 位置：显示器列表/刷新/跟随前台、X/Y、屏内居中、屏幕居中、吸附前台窗口。
+  - 手柄：ADS 模式、触发键、阈值、开火扩散、手柄图示。
+  - 快捷键：录制/清空/手动输入、切换下一预设、右键模式。
+  - 图片：选择/清除、原生缩略图、缩放。
+  - 预设：保存、创建、导入/导出、复制、重命名、删除（二次确认）、激活；游戏绑定增删。
+  - 系统：开机自启（反查主程序路径）、窗口材质（Acrylic / Mica / Transparent / Opaque）、
+    表面强度、退出主程序、版本信息。
+- **材质与视觉**：深色优先；窗口级系统材质 + 约 86% 不透明表面（强度滑杆 0.30–1.00 可调），
+  面板用半透明填充、1px 镜面边和分层色块；不再追求旧版整窗 35% 极端透明。
+- **构建**：`build.rs` 支持 `ACAJA_SKIP_MANIFEST=1`——GPUI 自带 Windows manifest，
+  设置进程只跳过 ACAJA manifest、仍保留图标/版本资源，避免 `CVT1100 duplicate resource`。
+  CI 先跑 `cargo test --release --features gpui-ui`，再分别构建 `acaja.exe` 与 `acaja-ui.exe`，
+  避免测试步骤覆盖后端 exe 的 manifest。
+- 版本号：`1.2.3` → `1.3.0`。
+
+已知边界：
+- 新界面是**深色优先**，不提供旧版 auto/light 主题切换（设计取舍）。
+- GPUI 仍没有逐元素 backdrop blur；玻璃感来自窗口级材质 + 内部半透明表面。
+- 文件选择使用原生 `rfd` 模态，打开期间 GPUI 不重绘属正常。
+- `acaja-ui.exe` 约 31 MB（GPUI + CJK 字体）；后端仍约 3 MB。
+- `gpui-kit 0.8.0` 精确 pin `gpui-pre 0.3.9`，升级需 deliberate。
+
+验证：本地
+`cargo check --target x86_64-pc-windows-msvc --all-targets`
+与
+`cargo check --target x86_64-pc-windows-msvc --features gpui-ui --all-targets`
+均通过；CI 结果待本轮 push 后确认。
+
+---
+
 ## [2026-10-20] v1.3 preview（分支 `refactor/gpui-ui`）：GPUI Kit 设置界面
 
 状态：🚧 **预览分支，未合并 main、未发版**。目标是在 Windows 实机上先看新 UI 的观感与材质。
