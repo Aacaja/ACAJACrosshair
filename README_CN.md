@@ -1,9 +1,9 @@
 # ACAJA —— Windows 准星覆盖工具
 
 >[!NOTE]
-> **当前版本 v1.2.3**：完整功能齐备（设置界面 / 托盘 / 热键 / 手柄 ADS / 按游戏自动切预设），见文末 [路线](#路线当前阶段ui-重度开发)。
+> **当前版本 v1.3.0**：完整功能齐备（设置界面 / 托盘 / 热键 / 手柄 ADS / 按游戏自动切预设），见文末 [路线](#路线)。
 
-ACAJA 是一个 Windows 桌面准星覆盖工具，用 **Rust** 编写（`windows-rs` + Direct2D + egui），是原 [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN)（小林の准星，Python/PySide6）的全新重写版。
+ACAJA 是一个 Windows 桌面准星覆盖工具，用 **Rust** 编写（`windows-rs` + Direct2D + GPUI Kit），是原 [CrossHairLIN](https://github.com/liuroland55/CrossHairLIN)（小林の准星，Python/PySide6）的全新重写版。
 
 可以在游戏画面上叠加自定义准星，**点击穿透**，不影响游戏操作。适用于没有准星、或想自定义准星样式的游戏（建议配合无边框窗口模式）。
 
@@ -13,10 +13,10 @@ ACAJA 是一个 Windows 桌面准星覆盖工具，用 **Rust** 编写（`window
 
 | 维度 | 旧版 (v3.1.0, PySide6) | ACAJA (Rust) |
 |---|---|---|
-| 产物大小 | 46 MB 单 exe | **~8 MB 单 exe**（后台壳 ~2.8 MB） |
+| 产物大小 | 46 MB 单 exe | **后台壳 ~3 MB + 设置界面 ~31 MB**（按需拉起） |
 | 架构 | 全屏透明窗口 + 20FPS 定时重绘 | **事件驱动 + 只绘制准星小窗口**，静止时 ≈0% CPU |
 | 渲染 | QPainter（CPU） | **Direct2D 硬件加速**（GPU 合成） |
-| 设置界面 | PySide6 传统窗口 | **egui 现代化设置窗**（实时预览、中英切换、深浅主题） |
+| 设置界面 | PySide6 传统窗口 | **GPUI Kit 现代化设置窗**（GPU 渲染、实时预览、中英切换） |
 | 点击穿透 | `WindowTransparentForInput` | 原生 `WS_EX_LAYERED\|TRANSPARENT` 分层窗口 |
 | 内置功能 | 8 种形状 | **22 种形状**、8 套风格模板、四象限多色、动态扩散、手柄支持、按游戏自动切预设 |
 | 运行时依赖 | Python + PySide6 | 零依赖，双击即用 |
@@ -27,7 +27,7 @@ ACAJA 是一个 Windows 桌面准星覆盖工具，用 **Rust** 编写（`window
 
 ## 1. 下载与启动
 
-1. 从 [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) 下载 `ACAJA-v1.2.3-x64.zip`（推荐，含两个 exe），
+1. 从 [Releases](https://github.com/Aacaja/ACAJACrosshair/releases) 下载 `ACAJA-v1.3.0-x64.zip`（推荐，含两个 exe），
    或从 [Actions](https://github.com/Aacaja/ACAJACrosshair/actions) 最新运行的 Artifacts 下载。
 2. 解压后双击 `acaja.exe`，你会看到：
    - ✅ **设置窗口**（深色界面）
@@ -128,8 +128,8 @@ ACAJA 是一个 Windows 桌面准星覆盖工具，用 **Rust** 编写（`window
 ├── 消息线程：Win32 消息泵（托盘/热键/RawInput 鼠标/前台检测/手柄事件）
 └── 手柄线程：XInput 轮询（125Hz）
 
-设置 UI 进程（acaja-ui.exe，按需拉起，关闭即整套释放 ~65MB）
-└── egui 设置窗；参数经 WM_COPYDATA 实时推给主进程
+设置 UI 进程（acaja-ui.exe，按需拉起，关闭即释放 GPUI/GPU 资源）
+└── GPUI Kit 设置窗；参数经 WM_COPYDATA 实时推给主进程
 ```
 
 ```
@@ -143,7 +143,7 @@ src/
 ├── overlay/        # D2D 渲染（22 形状、四象限色、描边、旋转、扩散、自定义图片）
 ├── input/          # XInput 手柄（动态触发源）+ RawInput 鼠标（右键切换/开火）
 ├── system/         # 托盘 / 热键 / 前台检测 / 多显示器 / 开机自启
-└── ui/             # egui 设置窗（预览、双语、主题、预设、游戏绑定、22 形状、8 模板）
+└── ui/             # GPUI Kit 设置窗（预览、双语、预设、游戏绑定、22 形状、8 模板）
 ```
 
 ## 系统要求
@@ -151,7 +151,7 @@ src/
 - Windows 10 / 11（x64）
 - 无任何运行时依赖
 
-## 路线（当前阶段：**UI 重度开发**）
+## 路线（当前阶段：**维护 + UI 打磨**）
 
 > 设计铁律：**主程序 `acaja.exe` 绝对干净轻量**（不链接 UI 框架、不加线程/轮询/系统钩子/依赖）——
 > 一切重量级能力只进设置进程 `acaja-ui.exe`（用完即走，占用无所谓）。不做游戏内快速面板。
@@ -162,7 +162,8 @@ src/
 |---|---|---|---|
 | 1 | v1.2.0 | 档案与编辑效率（功能：预设管理/热键录制/显示器/图片选择器/模板画廊/实时同步） | ✅ 已发布 |
 | 1.5 | v1.2.1 | 视觉重做：深黑玻璃拟态 + 衬线/非衬线双字体 + 丝滑动效 | ✅ 已发布 |
-| 1.6 | **v1.2.2** | **真·毛玻璃**：系统亚克力模糊 + 真半透明底 + 鼠标镜面高光/视差/边缘折射 + 缓动重构 + 背板预烘焙 | ✅ 本轮 |
+| 1.6 | v1.2.2 | **真·毛玻璃**：系统亚克力模糊 + 真半透明底 + 鼠标镜面高光/视差/边缘折射 + 缓动重构 + 背板预烘焙 | ✅ 已发布 |
+| 2.0 | **v1.3.0** | **GPUI Kit 设置界面**：全功能迁移、GPU 渲染、Acrylic / Mica / Transparent / Opaque 材质 | ✅ 已发布 |
 | ~~2–4~~ | — | ~~动态准星进阶 / 多屏与游戏集成 / 可用性打磨~~ | ❌ 已按用户要求取消 |
 
 ### 阶段 1.6（v1.2.2）已完成内容
@@ -183,7 +184,7 @@ src/
 
 ### 下一步 UI 优化点（待你的实机反馈）
 
-**已交付的可调项（v1.2.3）**：「系统」分区 → 毛玻璃模式（自动 / 亚克力 / Win11 背板 / 关闭）+ 玻璃强度（0.30~1.00，越大越透）。
+**v1.3.0 已交付**：设置界面迁移到 GPUI Kit（GPU 渲染、深色优先）；「系统」分区可切窗口材质（Acrylic / Mica / Transparent / Opaque）与表面强度；旧 egui 界面及其依赖已移除。
 你在真机上试出最合适的组合后告诉我，我把它设为默认值。
 
 **待办（按价值排序）**：

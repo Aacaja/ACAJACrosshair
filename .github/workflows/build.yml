@@ -30,11 +30,23 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build (release)
-        run: cargo build --release
-
+      # 先跑测试：测试目标也会链接 GPUI，设置 ACAJA_SKIP_MANIFEST 避免重复 manifest。
       - name: Run tests
-        run: cargo test --release
+        env:
+          ACAJA_SKIP_MANIFEST: "1"
+        run: cargo test --release --features gpui-ui
+
+      # 测试后再构建最终产物，确保 acaja.exe 带完整 ACAJA manifest（图标/DPI/版本）。
+      - name: Build backend
+        run: cargo build --release --bin acaja
+
+      # 设置界面 = GPUI Kit。gpui-pre 自带 Windows manifest（DPI/ComCtl32），
+      # ACAJA 的 winres manifest 不能再叠（CVT1100 duplicate MANIFEST）；
+      # ACAJA_SKIP_MANIFEST 保留图标/版本资源，只跳过 manifest。
+      - name: Build settings UI (GPUI)
+        env:
+          ACAJA_SKIP_MANIFEST: "1"
+        run: cargo build --release --bin acaja-ui --features gpui-ui
 
       - name: Package
         shell: pwsh

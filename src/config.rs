@@ -665,6 +665,10 @@ pub enum GlassMode {
     Acrylic,
     /// 只试 Win11 系统背板（DWM，官方支持路径）
     Backdrop,
+    /// Win11 Mica（GPUI 设置界面的默认“背板”选项）
+    Mica,
+    /// 纯透明（不申请系统模糊；GPUI 的 Transparent 模式）
+    Transparent,
     /// 关闭：始终用不透明底
     Off,
 }

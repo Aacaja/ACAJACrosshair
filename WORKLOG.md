@@ -6,6 +6,85 @@
 
 ---
 
+## [2026-10-22] v1.3.0：设置界面完整迁移到 GPUI Kit（全功能）
+
+状态：✅ 代码完成（本地类型校验通过；CI/实机验证后发版）。
+
+干到哪了：
+- **默认设置界面切换为 GPUI Kit**：`acaja-ui.exe` 由 `src/bin/ui.rs` + `src/ui/mod.rs` 提供；
+  旧 egui 设置界面、`eframe` / `egui` / `ab_glyph` 依赖、`system/windowfx.rs` 全部移除。
+- **文案表抽到 UI 无关层**：`src/ui/strings.rs` → `src/strings.rs`，后端托盘与 GPUI 设置界面共用一份。
+- **全功能迁移**：
+  - 形状样式：22 形状缩略图、自绘实时预览、8 套模板、主色/四象限、大小/粗细/透明度/旋转、
+    空心缺口/中心点、描边（开关/厚度/颜色/透明度）。
+  - 动态：开火扩散、恢复速度、后坐力指示、扩散形态预览。
+  - 位置：显示器列表/刷新/跟随前台、X/Y、屏内居中、屏幕居中、吸附前台窗口。
+  - 手柄：ADS 模式、触发键、阈值、开火扩散、手柄图示。
+  - 快捷键：录制/清空/手动输入、切换下一预设、右键模式。
+  - 图片：选择/清除、原生缩略图、缩放。
+  - 预设：保存、创建、导入/导出、复制、重命名、删除（二次确认）、激活；游戏绑定增删。
+  - 系统：开机自启（反查主程序路径）、窗口材质（Acrylic / Mica / Transparent / Opaque）、
+    表面强度、退出主程序、版本信息。
+- **材质与视觉**：深色优先；窗口级系统材质 + 约 86% 不透明表面（强度滑杆 0.30–1.00 可调），
+  面板用半透明填充、1px 镜面边和分层色块；不再追求旧版整窗 35% 极端透明。
+- **构建**：`build.rs` 支持 `ACAJA_SKIP_MANIFEST=1`——GPUI 自带 Windows manifest，
+  设置进程只跳过 ACAJA manifest、仍保留图标/版本资源，避免 `CVT1100 duplicate resource`。
+  CI 先跑 `cargo test --release --features gpui-ui`，再分别构建 `acaja.exe` 与 `acaja-ui.exe`，
+  避免测试步骤覆盖后端 exe 的 manifest。
+- 版本号：`1.2.3` → `1.3.0`。
+
+已知边界：
+- 新界面是**深色优先**，不提供旧版 auto/light 主题切换（设计取舍）。
+- GPUI 仍没有逐元素 backdrop blur；玻璃感来自窗口级材质 + 内部半透明表面。
+- 文件选择使用原生 `rfd` 模态，打开期间 GPUI 不重绘属正常。
+- `acaja-ui.exe` 约 31 MB（GPUI + CJK 字体）；后端仍约 3 MB。
+- `gpui-kit 0.8.0` 精确 pin `gpui-pre 0.3.9`，升级需 deliberate。
+
+验证：本地
+`cargo check --target x86_64-pc-windows-msvc --all-targets`
+与
+`cargo check --target x86_64-pc-windows-msvc --features gpui-ui --all-targets`
+均通过。
+CI run [`39636099933`](https://github.com/Aacaja/ACAJACrosshair/actions/runs/39636099933)
+success（8m29s；`test result: ok. 55 passed; 0 failed`）。
+测试数从 59 → 55 的原因：旧 egui 的 `ui/fonts.rs` 8 个字体解析测试随旧 UI 删除，
+新 GPUI UI 增加 4 个纯函数测试（hex / key / position / glass mode）。
+产物：`acaja.exe` 3.1MB / `acaja-ui.exe` 36MB / `ACAJA-v1.3.0-x64.zip` 17MB。
+
+---
+
+## [2026-10-20] v1.3 preview（分支 `refactor/gpui-ui`）：GPUI Kit 设置界面
+
+状态：🚧 **预览分支，未合并 main、未发版**。目标是在 Windows 实机上先看新 UI 的观感与材质。
+
+干到哪了：
+- 新增独立二进制 `acaja-ui-gpui.exe`（`src/bin/ui_gpui.rs` + `src/ui_gpui/mod.rs`）；
+  只有 Windows + `gpui-ui` feature 才编译，旧 `acaja-ui.exe` 和后端 `acaja.exe` 默认构建**完全不拉 GPUI**。
+- 无边框 GPUI 窗口 + `TitleBar` 自绘标题栏 + 200px 侧栏 + 底部操作条；
+  Style 分区：自绘准星预览（复用 `overlay::shapes`）、22 形状缩略图、主色、大小/粗细/透明度滑杆、多色/描边开关。
+  System 分区：运行时切换 `WindowBackgroundAppearance`（Acrylic / Mica / Transparent / Opaque）。
+- 材质取舍：窗口级真模糊 + **~86% 不透明**深色表面（旧版整窗 35% 透明太极端），优先可读性与高级感；
+  面板内部仍用半透明填充、1px 镜面边和分层色块伪造玻璃。GPUI 目前没有逐元素 backdrop blur（gpui-kit#3598）。
+- 复用现有 `Preset` / `PresetStore` / `WM_COPYDATA`；滑杆拖动 120ms 节流实时推送，「应用」落盘并推送，关窗自动保存。
+- CI 增加 `cargo build --release --bin acaja-ui-gpui --features gpui-ui`，并把 `acaja-ui-gpui.exe` 打进 artifact/zip。
+
+已知边界：
+- 其余 6 个分区为占位（Dynamic/Position/Gamepad/Hotkey/Image/Presets），后续逐项迁移。
+- 四象限配色编辑器未做；多色开关会沿用现有预设的四色。
+- GPUI 0.8.0 精确 pin `gpui-pre 0.3.9`；本机 Rust 1.92 对其中几个新稳定 API 需要本地 bootstrap 补丁，
+  CI 用最新 stable，最终以 CI 日志为准。
+
+验证：本地 `cargo check --target x86_64-pc-windows-msvc --features gpui-ui --bin acaja-ui-gpui` 通过；
+CI run [`39392911066`](https://github.com/Aacaja/ACAJACrosshair/actions/runs/39392911066) success（12m56s，59 单测全过）。
+产物：`acaja.exe` 3.1MB / `acaja-ui.exe` 16MB / `acaja-ui-gpui.exe` 31MB / zip 23MB；
+artifact `ACAJA-windows-x64` 已包含 `acaja-ui-gpui.exe`。
+
+踩坑：`gpui-pre` 自带 Windows manifest（DPI/ComCtl32），与 `build.rs` 的 winres manifest 叠加会
+`CVT1100 duplicate resource (MANIFEST)`。CI 的 GPUI 步骤设 `ACAJA_SKIP_WINRES=1` 跳过 ACAJA 资源；
+预览 exe 暂无 ACAJA 图标/版本资源，正式切换为默认 UI 时再处理（或关闭 gpui 的 windows-manifest feature）。
+
+---
+
 ## [2026-09-11] v1.2.3：毛玻璃可调（模式 + 强度）—— 把「只有真机能看到的效果」交给用户定
 
 总目标：用户确认系统为 **Windows 11**；并对网页界面给出结论：**暂时不实装**，仅在咨询可行性，
