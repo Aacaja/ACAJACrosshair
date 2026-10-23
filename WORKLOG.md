@@ -44,7 +44,12 @@
 `cargo check --target x86_64-pc-windows-msvc --all-targets`
 与
 `cargo check --target x86_64-pc-windows-msvc --features gpui-ui --all-targets`
-均通过；CI 结果待本轮 push 后确认。
+均通过。
+CI run [`39636099933`](https://github.com/Aacaja/ACAJACrosshair/actions/runs/39636099933)
+success（8m29s；`test result: ok. 55 passed; 0 failed`）。
+测试数从 59 → 55 的原因：旧 egui 的 `ui/fonts.rs` 8 个字体解析测试随旧 UI 删除，
+新 GPUI UI 增加 4 个纯函数测试（hex / key / position / glass mode）。
+产物：`acaja.exe` 3.1MB / `acaja-ui.exe` 36MB / `ACAJA-v1.3.0-x64.zip` 17MB。
 
 ---
 
